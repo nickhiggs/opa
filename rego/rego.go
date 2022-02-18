@@ -514,6 +514,7 @@ type Rego struct {
 	target                 string // target type (wasm, rego, etc.)
 	opa                    opa.EvalEngine
 	generateJSON           func(*ast.Term, *EvalContext) (interface{}, error)
+	parseResultAST         func(string) (*ast.Term, error)
 	printHook              print.Hook
 	enablePrintStatements  bool
 	distributedTacingOpts  tracing.Options
@@ -1059,6 +1060,13 @@ func GenerateJSON(f func(*ast.Term, *EvalContext) (interface{}, error)) func(r *
 	}
 }
 
+// ParseResultAST sets the string to AST converter for the results of WASM
+func ParseResultAST(f func(string) (*ast.Term, error)) func(r *Rego) {
+	return func(r *Rego) {
+		r.parseResultAST = f
+	}
+}
+
 // PrintHook sets the object to use for handling print statement outputs.
 func PrintHook(h print.Hook) func(r *Rego) {
 	return func(r *Rego) {
@@ -1136,6 +1144,10 @@ func New(options ...func(r *Rego)) *Rego {
 
 	if r.generateJSON == nil {
 		r.generateJSON = generateJSON
+	}
+
+	if r.parseResultAST == nil {
+		r.parseResultAST = ast.ParseTerm
 	}
 
 	return r
@@ -1977,7 +1989,7 @@ func (r *Rego) evalWasm(ctx context.Context, ectx *EvalContext) (ResultSet, erro
 		return nil, err
 	}
 
-	parsed, err := ast.ParseTerm(string(result.Result))
+	parsed, err := r.parseResultAST(string(result.Result))
 	if err != nil {
 		return nil, err
 	}
