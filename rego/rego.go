@@ -1977,7 +1977,9 @@ func (r *Rego) evalWasm(ctx context.Context, ectx *EvalContext) (ResultSet, erro
 		return nil, err
 	}
 
-	parsed, err := ast.ParseTerm(string(result.Result))
+	parsed, err := ast.ParseTermWithOpts(string(result.Result), ast.ParserOptions{
+		Capabilities: ectx.capabilities,
+	})
 	if err != nil {
 		return nil, err
 	}
