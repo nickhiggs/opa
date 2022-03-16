@@ -504,7 +504,13 @@ func ParsePackage(input string) (*Package, error) {
 // ParseTerm returns exactly one term.
 // If multiple terms are parsed, an error is returned.
 func ParseTerm(input string) (*Term, error) {
-	body, err := ParseBody(input)
+	return ParseTermWithOpts(input, ParserOptions{})
+}
+
+// ParseTermWithOpts returns exactly one term.
+// If multiple terms are parsed, an error is returned.
+func ParseTermWithOpts(input string, popts ParserOptions) (*Term, error) {
+	body, err := ParseBodyWithOpts(input, popts)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse term")
 	}
