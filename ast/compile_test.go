@@ -6,6 +6,7 @@ package ast
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -294,6 +295,28 @@ func TestModuleTree(t *testing.T) {
 
 }
 
+func TestModuleTreeFilenameOrder(t *testing.T) {
+	// NOTE(sr): It doesn't matter that these are conflicting; but that's where it
+	// becomes very apparent: before this change, the rule that was reported as
+	// "conflicting" was that of either one of the input files, randomly.
+	mods := map[string]*Module{
+		"0.rego": MustParseModule("package p\nr = 1 { true }"),
+		"1.rego": MustParseModule("package p\nr = 2 { true }"),
+	}
+	tree := NewModuleTree(mods)
+	vals := tree.Children[Var("data")].Children[String("p")].Modules
+	if exp, act := 2, len(vals); exp != act {
+		t.Fatalf("expected %d rules, found %d", exp, act)
+	}
+	mod0 := vals[0]
+	mod1 := vals[1]
+	if exp, act := IntNumberTerm(1), mod0.Rules[0].Head.Value; !exp.Equal(act) {
+		t.Errorf("expected value %v, got %v", exp, act)
+	}
+	if exp, act := IntNumberTerm(2), mod1.Rules[0].Head.Value; !exp.Equal(act) {
+		t.Errorf("expected value %v, got %v", exp, act)
+	}
+}
 func TestRuleTree(t *testing.T) {
 
 	mods := getCompilerTestModules()
@@ -373,16 +396,61 @@ func TestCompilerExample(t *testing.T) {
 }
 
 func TestCompilerWithStageAfter(t *testing.T) {
-	c := NewCompiler().WithStageAfter(
-		"CheckRecursion",
-		CompilerStageDefinition{"MockStage", "mock_stage", mockStageFunctionCall},
-	)
-	m := MustParseModule(testModule)
-	c.Compile(map[string]*Module{"testMod": m})
+	t.Run("after failing means overall failure", func(t *testing.T) {
+		c := NewCompiler().WithStageAfter(
+			"CheckRecursion",
+			CompilerStageDefinition{"MockStage", "mock_stage",
+				func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error") }},
+		)
+		m := MustParseModule(testModule)
+		c.Compile(map[string]*Module{"testMod": m})
 
-	if !c.Failed() {
-		t.Errorf("Expected compilation error")
-	}
+		if !c.Failed() {
+			t.Errorf("Expected compilation error")
+		}
+	})
+
+	t.Run("first 'after' failure inhibits other 'after' stages", func(t *testing.T) {
+		c := NewCompiler().
+			WithStageAfter("CheckRecursion",
+				CompilerStageDefinition{"MockStage", "mock_stage",
+					func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error") }}).
+			WithStageAfter("CheckRecursion",
+				CompilerStageDefinition{"MockStage2", "mock_stage2",
+					func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error two") }},
+			)
+		m := MustParseModule(`package p
+q := true`)
+
+		c.Compile(map[string]*Module{"testMod": m})
+
+		if !c.Failed() {
+			t.Errorf("Expected compilation error")
+		}
+		if exp, act := 1, len(c.Errors); exp != act {
+			t.Errorf("expected %d errors, got %d: %v", exp, act, c.Errors)
+		}
+	})
+
+	t.Run("'after' failure inhibits other ordinary stages", func(t *testing.T) {
+		c := NewCompiler().
+			WithStageAfter("CheckRecursion",
+				CompilerStageDefinition{"MockStage", "mock_stage",
+					func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error") }})
+		m := MustParseModule(`package p
+q {
+	1 == "a" # would fail "CheckTypes", the next stage
+}
+`)
+		c.Compile(map[string]*Module{"testMod": m})
+
+		if !c.Failed() {
+			t.Errorf("Expected compilation error")
+		}
+		if exp, act := 1, len(c.Errors); exp != act {
+			t.Errorf("expected %d errors, got %d: %v", exp, act, c.Errors)
+		}
+	})
 }
 
 func TestCompilerFunctions(t *testing.T) {
@@ -609,7 +677,7 @@ func TestCompilerErrorLimit(t *testing.T) {
 		"rego_compile_error: error limit reached",
 	}
 
-	var result []string
+	result := make([]string, 0, len(errs))
 	for _, err := range errs {
 		result = append(result, err.Error())
 	}
@@ -723,43 +791,78 @@ func TestCompilerCheckSafetyBodyReordering(t *testing.T) {
 }
 
 func TestCompilerCheckSafetyBodyReorderingClosures(t *testing.T) {
-	c := NewCompiler()
-	c.Modules = map[string]*Module{
-		"mod": MustParseModule(
-			`package compr
+	opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+
+	tests := []struct {
+		note string
+		mod  *Module
+		exp  Body
+	}{
+		{
+			note: "comprehensions-1",
+			mod: MustParseModule(`package compr
 
 import data.b
 import data.c
+p = true { v = [null | true]; xs = [x | a[i] = x; a = [y | y != 1; y = c[j]]]; xs[j] > 0; z = [true | data.a.b.d.t with input as i2; i2 = i]; b[i] = j }
+`),
+			exp: MustParseBody(`v = [null | true]; data.b[i] = j; xs = [x | a = [y | y = data.c[j]; y != 1]; a[i] = x]; xs[j] > 0; z = [true | i2 = i; data.a.b.d.t with input as i2]`),
+		},
+		{
+			note: "comprehensions-2",
+			mod: MustParseModule(`package compr
 
+import data.b
+import data.c
+q = true { _ = [x | x = b[i]]; _ = b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _ }
+`),
+			exp: MustParseBody(`_ = [x | x = data.b[i]]; _ = data.b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _`),
+		},
+
+		{
+			note: "comprehensions-3",
+			mod: MustParseModule(`package compr
+
+import data.b
+import data.c
 fn(x) = y {
 	trim(x, ".", y)
 }
+r = true { a = [x | split(y, ".", z); x = z[i]; fn("...foo.bar..", y)] }
+`),
+			exp: MustParseBody(`a = [x | data.compr.fn("...foo.bar..", y); split(y, ".", z); x = z[i]]`),
+		},
+		{
+			note: "closure over function output",
+			mod: MustParseModule(`package test
+import future.keywords
 
-p = true { v = [null | true]; xs = [x | a[i] = x; a = [y | y != 1; y = c[j]]]; xs[j] > 0; z = [true | data.a.b.d.t with input as i2; i2 = i]; b[i] = j }
-q = true { _ = [x | x = b[i]]; _ = b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _ }
-r = true { a = [x | split(y, ".", z); x = z[i]; fn("...foo.bar..", y)] }`,
-		),
+p {
+	object.get(input.subject.roles[_], comp, [""], output)
+	comp = [ 1 | true ]
+	every y in [2] {
+		y in output
+	}
+}`),
+			exp: MustParseBodyWithOpts(`comp = [1 | true]
+				__local2__ = [2]
+				object.get(input.subject.roles[_], comp, [""], output)
+				every __local0__, __local1__ in __local2__ { internal.member_2(__local1__, output) }`, opts),
+		},
 	}
 
-	compileStages(c, c.checkSafetyRuleBodies)
-	assertNotFailed(t, c)
-
-	result1 := c.Modules["mod"].Rules[1].Body
-	expected1 := MustParseBody(`v = [null | true]; data.b[i] = j; xs = [x | a = [y | y = data.c[j]; y != 1]; a[i] = x]; z = [true | i2 = i; data.a.b.d.t with input as i2]; xs[j] > 0`)
-	if !result1.Equal(expected1) {
-		t.Errorf("Expected reordered body to be equal to:\n%v\nBut got:\n%v", expected1, result1)
-	}
-
-	result2 := c.Modules["mod"].Rules[2].Body
-	expected2 := MustParseBody(`_ = [x | x = data.b[i]]; _ = data.b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _`)
-	if !result2.Equal(expected2) {
-		t.Errorf("Expected pre-ordered body to equal:\n%v\nBut got:\n%v", expected2, result2)
-	}
-
-	result3 := c.Modules["mod"].Rules[3].Body
-	expected3 := MustParseBody(`a = [x | data.compr.fn("...foo.bar..", y); split(y, ".", z); x = z[i]]`)
-	if !result3.Equal(expected3) {
-		t.Errorf("Expected pre-ordered body to equal:\n%v\nBut got:\n%v", expected3, result3)
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			c := NewCompiler()
+			c.Modules = map[string]*Module{"mod": tc.mod}
+			compileStages(c, c.checkSafetyRuleBodies)
+			assertNotFailed(t, c)
+			last := len(c.Modules["mod"].Rules) - 1
+			actual := c.Modules["mod"].Rules[last].Body
+			if !actual.Equal(tc.exp) {
+				t.Errorf("Expected reordered body to be equal to:\n%v\nBut got:\n%v", tc.exp, actual)
+			}
+		})
 	}
 }
 
@@ -797,7 +900,7 @@ func TestCompilerCheckSafetyBodyErrors(t *testing.T) {
 		{"array-compr-mixed", `p { _ = [x | y = [a | a = z[i]]] }`, `{a, x, z, i}`},
 		{"array-compr-builtin", `p { [true | eq != 2] }`, `{eq,}`},
 		{"closure-self", `p { x = [x | x = 1] }`, `{x,}`},
-		{"closure-transitive", `p { x = y; x = [y | y = 1] }`, `{y,}`},
+		{"closure-transitive", `p { x = y; x = [y | y = 1] }`, `{x,y}`},
 		{"nested", `p { count(baz[i].attr[bar[dead.beef]], n) }`, `{dead,}`},
 		{"negated-import", `p { not foo; not bar; not baz }`, `set()`},
 		{"rewritten", `p[{"foo": dead[i]}] { true }`, `{dead, i}`},
@@ -895,181 +998,6 @@ func TestCompilerCheckTypes(t *testing.T) {
 	assertNotFailed(t, c)
 }
 
-func TestCompilerCheckTypesWithSchema(t *testing.T) {
-	c := NewCompiler()
-	var schema interface{}
-	err := util.Unmarshal([]byte(objectSchema), &schema)
-	if err != nil {
-		t.Fatal("Unexpected error:", err)
-	}
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, schema)
-	c.WithSchemas(schemaSet)
-	compileStages(c, c.checkTypes)
-	assertNotFailed(t, c)
-}
-
-func TestCompilerCheckTypesWithRegexPatternInSchema(t *testing.T) {
-	c := NewCompiler()
-	var schema interface{}
-	// Negative lookahead is not supported in the Go regex dialect, but this is still a valid
-	// JSON schema. Since we don't rely on the "pattern" attribute for type checking, ensure
-	// that this still works (by being ignored)
-	err := util.Unmarshal([]byte(`{
-		"properties": {
-			"name": {
-				"pattern": "^(?!testing:.*)[a-z]+$",
-				"type": "string"
-			}
-		}
-	}`), &schema)
-	if err != nil {
-		t.Fatal("Unexpected error:", err)
-	}
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, schema)
-	c.WithSchemas(schemaSet)
-	compileStages(c, c.checkTypes)
-	assertNotFailed(t, c)
-}
-
-func TestCompilerCheckTypesWithAllOfSchema(t *testing.T) {
-
-	tests := []struct {
-		note          string
-		schema        string
-		expectedError error
-	}{
-		{
-			note:          "allOf with mergeable Object types in schema",
-			schema:        allOfObjectSchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Array types in schema",
-			schema:        allOfArraySchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf without a parent schema",
-			schema:        allOfSchemaParentVariation,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with empty schema",
-			schema:        emptySchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Array of Object types in schema",
-			schema:        allOfArrayOfObjects,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Object types in schema with type declaration missing",
-			schema:        allOfObjectMissing,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with Array of mergeable different types in schema",
-			schema:        allOfArrayDifTypes,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Object containing Array types in schema",
-			schema:        allOfArrayInsideObject,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Array types in schema with type declaration missing",
-			schema:        allOfArrayMissing,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable types inside of core schema",
-			schema:        allOfInsideCoreSchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable String types in schema",
-			schema:        allOfStringSchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Integer types in schema",
-			schema:        allOfIntegerSchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Boolean types in schema",
-			schema:        allOfBooleanSchema,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf with mergeable Array types with uneven numbers of items",
-			schema:        allOfSchemaWithUnevenArray,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf schema with unmergeable Array of Arrays",
-			schema:        allOfArrayOfArrays,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-		{
-			note:          "allOf schema with Array and Object types as siblings",
-			schema:        allOfObjectAndArray,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-		{
-			note:          "allOf schema with Array type that contains different unmergeable types",
-			schema:        allOfArrayDifTypesWithError,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-		{
-			note:          "allOf schema with different unmergeable types",
-			schema:        allOfTypeErrorSchema,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-		{
-			note:          "allOf unmergeable schema with different parent and items types",
-			schema:        allOfSchemaWithParentError,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-		{
-			note:          "allOf schema of Array type with uneven numbers of items to merge",
-			schema:        allOfSchemaWithUnevenArray,
-			expectedError: nil,
-		},
-		{
-			note:          "allOf schema with unmergeable types String and Boolean",
-			schema:        allOfStringSchemaWithError,
-			expectedError: fmt.Errorf("unable to merge these schemas"),
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.note, func(t *testing.T) {
-			c := NewCompiler()
-			var schema interface{}
-			err := util.Unmarshal([]byte(tc.schema), &schema)
-			if err != nil {
-				t.Fatal("Unexpected error:", err)
-			}
-			schemaSet := NewSchemaSet()
-			schemaSet.Put(SchemaRootRef, schema)
-			c.WithSchemas(schemaSet)
-			compileStages(c, c.checkTypes)
-			if tc.expectedError != nil {
-				if errors.Is(c.Errors, tc.expectedError) {
-					t.Fatal("Unexpected error:", err)
-				}
-			} else {
-				assertNotFailed(t, c)
-			}
-		})
-	}
-}
-
 func TestCompilerCheckRuleConflicts(t *testing.T) {
 
 	c := getCompilerWithParsedModules(map[string]string{
@@ -1103,14 +1031,7 @@ g(1,2) { true }`,
 p { true }`,
 		"mod6.rego": `package badrules.existserr
 
-p { true }`,
-		"mod7.rego": `package badrules.redeclaration
-
-p1 := 1
-p1 := 2
-
-p2 = 1
-p2 := 2`})
+p { true }`})
 
 	c.WithPathConflictsCheck(func(path []string) (bool, error) {
 		if reflect.DeepEqual(path, []string{"badrules", "dataoverlap", "p"}) {
@@ -1133,8 +1054,6 @@ p2 := 2`})
 		"rego_type_error: multiple default rules named foo found",
 		"rego_type_error: package badrules.r conflicts with rule defined at mod1.rego:7",
 		"rego_type_error: package badrules.r conflicts with rule defined at mod1.rego:8",
-		"rego_type_error: rule named p1 redeclared at mod7.rego:4",
-		"rego_type_error: rule named p2 redeclared at mod7.rego:7",
 	}
 
 	assertCompilerErrorStrings(t, c, expected)
@@ -1524,6 +1443,118 @@ func TestCompilerRewriteExprTerms(t *testing.T) {
 	}
 }
 
+func TestIllegalFunctionCallRewrite(t *testing.T) {
+	cases := []struct {
+		note           string
+		module         string
+		expectedErrors []string
+	}{
+		/*{
+		  			note: "function call override in function value",
+		  			module: `package test
+		  foo(x) := x
+
+		  p := foo(bar) {
+		  	#foo := 1
+		  	bar := 2
+		  }`,
+		  			expectedErrors: []string{
+		  				"undefined function foo",
+		  			},
+		  		},*/
+		{
+			note: "function call override in array comprehension value",
+			module: `package test
+p := [foo(bar) | foo := 1; bar := 2]`,
+			expectedErrors: []string{
+				"called function foo shadowed",
+			},
+		},
+		{
+			note: "function call override in set comprehension value",
+			module: `package test
+p := {foo(bar) | foo := 1; bar := 2}`,
+			expectedErrors: []string{
+				"called function foo shadowed",
+			},
+		},
+		{
+			note: "function call override in object comprehension value",
+			module: `package test
+p := {foo(bar): bar(foo) | foo := 1; bar := 2}`,
+			expectedErrors: []string{
+				"called function bar shadowed",
+				"called function foo shadowed",
+			},
+		},
+		{
+			note: "function call override in array comprehension value",
+			module: `package test
+p := [foo.bar(baz) | foo := 1; bar := 2; baz := 3]`,
+			expectedErrors: []string{
+				"called function foo.bar shadowed",
+			},
+		},
+		{
+			note: "nested function call override in array comprehension value",
+			module: `package test
+p := [baz(foo(bar)) | foo := 1; bar := 2]`,
+			expectedErrors: []string{
+				"called function foo shadowed",
+			},
+		},
+		{
+			note: "function call override of 'input' root document",
+			module: `package test
+p := [input() | input := 1]`,
+			expectedErrors: []string{
+				"called function input shadowed",
+			},
+		},
+		{
+			note: "function call override of 'data' root document",
+			module: `package test
+p := [data() | data := 1]`,
+			expectedErrors: []string{
+				"called function data shadowed",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+			compiler := NewCompiler()
+			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+
+			compiler.Modules = map[string]*Module{
+				"test": MustParseModuleWithOpts(tc.module, opts),
+			}
+			compileStages(compiler, compiler.rewriteLocalVars)
+
+			result := make([]string, 0, len(compiler.Errors))
+			for i := range compiler.Errors {
+				result = append(result, compiler.Errors[i].Message)
+			}
+
+			sort.Strings(tc.expectedErrors)
+			sort.Strings(result)
+
+			if len(tc.expectedErrors) != len(result) {
+				t.Fatalf("Expected %d errors but got %d:\n\n%v\n\nGot:\n\n%v",
+					len(tc.expectedErrors), len(result),
+					strings.Join(tc.expectedErrors, "\n"), strings.Join(result, "\n"))
+			}
+
+			for i := range result {
+				if result[i] != tc.expectedErrors[i] {
+					t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v",
+						strings.Join(tc.expectedErrors, "\n"), strings.Join(result, "\n"))
+				}
+			}
+		})
+	}
+}
+
 func TestCompilerCheckUnusedImports(t *testing.T) {
 	cases := []strictnessTestCase{
 		{
@@ -1738,6 +1769,9 @@ func TestCompilerCheckDuplicateImports(t *testing.T) {
 				import input.foo
 				import data.foo
 				import data.bar.foo
+
+				p := noconflict
+				q := foo
 			`,
 			expectedErrors: Errors{
 				&Error{
@@ -1755,6 +1789,9 @@ func TestCompilerCheckDuplicateImports(t *testing.T) {
 				import input.noconflict
 				import input.foo
 				import input.bar as foo
+
+				p := noconflict
+				q := foo
 			`,
 			expectedErrors: Errors{
 				&Error{
@@ -1959,9 +1996,21 @@ func TestCompilerCheckDeprecatedMethods(t *testing.T) {
 			note: "user-defined any()",
 			module: `package test
 				import future.keywords.in
-				any(arr) = true in arr
+				any(arr) := true in arr
 				p := any([true, false])
 			`,
+		},
+		{
+			note: "re_match built-in",
+			module: `package test
+				p := re_match("[a]", "a")
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte(`re_match("[a]", "a")`), "", 2, 10),
+					Message:  "deprecated built-in function calls in expression: re_match",
+				},
+			},
 		},
 	}
 
@@ -2335,6 +2384,274 @@ elsekw {
 	assertRulesEqual(t, rule5, expected5)
 }
 
+func TestCompilerRewriteRegoMetadataCalls(t *testing.T) {
+	tests := []struct {
+		note   string
+		module string
+		exp    string
+	}{
+		{
+			note: "rego.metadata called, no metadata",
+			module: `package test
+
+p {
+	rego.metadata.chain()[0].path == ["test", "p"]
+	rego.metadata.rule() == {}
+}`,
+			exp: `package test
+
+p = true {
+	__local2__ = [{"path": ["test", "p"]}]
+	__local3__ = {}
+	__local0__ = __local2__
+	equal(__local0__[0].path, ["test", "p"])
+	__local1__ = __local3__
+	equal(__local1__, {})
+}`,
+		},
+		{
+			note: "rego.metadata called, no output var, no metadata",
+			module: `package test
+
+p {
+	rego.metadata.chain()
+	rego.metadata.rule()
+}`,
+			exp: `package test
+
+p = true {
+	__local0__ = [{"path": ["test", "p"]}]
+	__local1__ = {}
+	__local0__
+	__local1__
+}`,
+		},
+		{
+			note: "rego.metadata called, with metadata",
+			module: `# METADATA
+# description: A test package
+package test
+
+# METADATA
+# title: My P Rule
+p {
+	rego.metadata.chain()[0].title == "My P Rule"
+	rego.metadata.chain()[1].description == "A test package"
+}
+
+# METADATA
+# title: My Other P Rule
+p {
+	rego.metadata.rule().title == "My Other P Rule"
+}`,
+			exp: `# METADATA
+# {"scope":"package","description":"A test package"}
+package test
+
+# METADATA
+# {"scope":"rule","title":"My P Rule"}
+p = true {
+	__local3__ = [
+		{"annotations": {"scope": "rule", "title": "My P Rule"}, "path": ["test", "p"]},
+		{"annotations": {"description": "A test package", "scope": "package"}, "path": ["test"]}
+	]
+	__local0__ = __local3__
+	equal(__local0__[0].title, "My P Rule")
+	__local1__ = __local3__
+	equal(__local1__[1].description, "A test package")
+}
+
+# METADATA
+# {"scope":"rule","title":"My Other P Rule"}
+p = true {
+	__local4__ = {"scope": "rule", "title": "My Other P Rule"}
+	__local2__ = __local4__
+	equal(__local2__.title, "My Other P Rule")
+}`,
+		},
+		{
+			note: "rego.metadata referenced multiple times",
+			module: `# METADATA
+# description: TEST
+package test
+
+p {
+	rego.metadata.chain()[0].path == ["test", "p"]
+	rego.metadata.chain()[1].path == ["test"]
+}`,
+			exp: `# METADATA
+# {"scope":"package","description":"TEST"}
+package test
+
+p = true {
+	__local2__ = [
+		{"path": ["test", "p"]},
+		{"annotations": {"description": "TEST", "scope": "package"}, "path": ["test"]}
+	]
+	__local0__ = __local2__
+	equal(__local0__[0].path, ["test", "p"])
+	__local1__ = __local2__
+	equal(__local1__[1].path, ["test"]) }`,
+		},
+		{
+			note: "rego.metadata return value",
+			module: `package test
+
+p := rego.metadata.chain()`,
+			exp: `package test
+
+p := __local0__ {
+	__local1__ = [{"path": ["test", "p"]}]
+	true
+	__local0__ = __local1__
+}`,
+		},
+		{
+			note: "rego.metadata argument in function call",
+			module: `package test
+
+p {
+	q(rego.metadata.chain())
+}
+
+q(s) {
+	s == ["test", "p"]
+}`,
+			exp: `package test
+
+p = true {
+	__local2__ = [{"path": ["test", "p"]}]
+	__local1__ = __local2__
+	data.test.q(__local1__)
+}
+
+q(__local0__) = true {
+	equal(__local0__, ["test", "p"])
+}`,
+		},
+		{
+			note: "rego.metadata used in array comprehension",
+			module: `package test
+
+p = [x | x := rego.metadata.chain()]`,
+			exp: `package test
+
+p = [__local0__ | __local1__ = __local2__; __local0__ = __local1__] {
+	__local2__ = [{"path": ["test", "p"]}]
+	true
+}`,
+		},
+		{
+			note: "rego.metadata used in nested array comprehension",
+			module: `package test
+
+p {
+	y := [x | x := rego.metadata.chain()]
+	y[0].path == ["test", "p"]
+}`,
+			exp: `package test
+
+p = true {
+	__local3__ = [{"path": ["test", "p"]}];
+	__local1__ = [__local0__ | __local2__ = __local3__; __local0__ = __local2__];
+	equal(__local1__[0].path, ["test", "p"])
+}`,
+		},
+		{
+			note: "rego.metadata used in set comprehension",
+			module: `package test
+
+p = {x | x := rego.metadata.chain()}`,
+			exp: `package test
+
+p = {__local0__ | __local1__ = __local2__; __local0__ = __local1__} {
+	__local2__ = [{"path": ["test", "p"]}]
+	true
+}`,
+		},
+		{
+			note: "rego.metadata used in nested set comprehension",
+			module: `package test
+
+p {
+	y := {x | x := rego.metadata.chain()}
+	y[0].path == ["test", "p"]
+}`,
+			exp: `package test
+
+p = true {
+	__local3__ = [{"path": ["test", "p"]}]
+	__local1__ = {__local0__ | __local2__ = __local3__; __local0__ = __local2__}
+	equal(__local1__[0].path, ["test", "p"])
+}`,
+		},
+		{
+			note: "rego.metadata used in object comprehension",
+			module: `package test
+
+p = {i: x | x := rego.metadata.chain()[i]}`,
+			exp: `package test
+
+p = {i: __local0__ | __local1__ = __local2__; __local0__ = __local1__[i]} {
+	__local2__ = [{"path": ["test", "p"]}]
+	true
+}`,
+		},
+		{
+			note: "rego.metadata used in nested object comprehension",
+			module: `package test
+
+p {
+	y := {i: x | x := rego.metadata.chain()[i]}
+	y[0].path == ["test", "p"]
+}`,
+			exp: `package test
+
+p = true {
+	__local3__ = [{"path": ["test", "p"]}]
+	__local1__ = {i: __local0__ | __local2__ = __local3__; __local0__ = __local2__[i]}
+	equal(__local1__[0].path, ["test", "p"])
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			c := NewCompiler()
+			c.Modules = map[string]*Module{
+				"test.rego": MustParseModule(tc.module),
+			}
+			compileStages(c, c.rewriteRegoMetadataCalls)
+			assertNotFailed(t, c)
+
+			result := c.Modules["test.rego"]
+			exp := MustParseModuleWithOpts(tc.exp, ParserOptions{ProcessAnnotation: true})
+
+			if result.Compare(exp) != 0 {
+				t.Fatalf("\nExpected:\n\n%v\n\nGot:\n\n%v", exp, result)
+			}
+		})
+	}
+}
+
+func TestCompilerOverridingSelfCalls(t *testing.T) {
+	c := NewCompiler()
+	c.Modules = map[string]*Module{
+		"self.rego": MustParseModule(`package self.metadata
+
+chain(x) = "foo"
+rule := "bar"`),
+		"test.rego": MustParseModule(`package test
+import data.self
+
+p := self.metadata.chain(42)
+q := self.metadata.rule`),
+	}
+
+	compileStages(c, nil)
+	assertNotFailed(t, c)
+}
+
 func TestCompilerRewriteLocalAssignments(t *testing.T) {
 
 	tests := []struct {
@@ -2657,18 +2974,50 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewrite_value_in_assignment {
+				rewrite_with_value_in_assignment {
 					a := 1
 					b := 1 with input as [a]
 				}
 			`,
 			exp: `
 				package test
-				rewrite_value_in_assignment = true { __local0__ = 1; __local1__ = 1 with input as [__local0__] }
+				rewrite_with_value_in_assignment = true { __local0__ = 1; __local1__ = 1 with input as [__local0__] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
 				Var("__local1__"): Var("b"),
+			},
+		},
+		{
+			module: `
+				package test
+				rewrite_with_value_in_expr {
+					a := 1
+					a > 0 with input as [a]
+				}
+			`,
+			exp: `
+				package test
+				rewrite_with_value_in_expr = true { __local0__ = 1; gt(__local0__, 0) with input as [__local0__] }
+			`,
+			expRewrittenMap: map[Var]Var{
+				Var("__local0__"): Var("a"),
+			},
+		},
+		{
+			module: `
+				package test
+				rewrite_nested_with_value_in_expr {
+					a := 1
+					a > 0 with input as object.union({"a": a}, {"max_a": max([a])})
+				}
+			`,
+			exp: `
+				package test
+				rewrite_nested_with_value_in_expr = true { __local0__ = 1; gt(__local0__, 0) with input as object.union({"a": __local0__}, {"max_a": max([__local0__])}) }
+			`,
+			expRewrittenMap: map[Var]Var{
+				Var("__local0__"): Var("a"),
 			},
 		},
 		{
@@ -3731,10 +4080,12 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 	`
 
 	tests := []struct {
-		note     string
-		input    string
-		expected string
-		wantErr  error
+		note         string
+		input        string
+		opts         func(*Compiler) *Compiler
+		expected     string
+		expectedRule *Rule
+		wantErr      error
 	}{
 		{
 			note:     "nop",
@@ -3774,19 +4125,118 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 		{
 			note:    "invalid target",
 			input:   `p { true with foo.q as 1 }`,
-			wantErr: fmt.Errorf("rego_type_error: with keyword target must reference existing input or data"),
+			wantErr: fmt.Errorf("rego_type_error: with keyword target must reference existing input, data, or a function"),
+		},
+		{
+			note:     "built-in function: replaced by (unknown) var",
+			input:    `p { true with time.now_ns as foo }`,
+			expected: `p { true with time.now_ns as foo }`, // `foo` still a Var here
+		},
+		{
+			note: "built-in function: valid, arity 0",
+			input: `
+				p { true with time.now_ns as now }
+				now() = 1
+			`,
+			expected: `p { true with time.now_ns as data.test.now }`,
+		},
+		{
+			note: "built-in function: valid func ref, arity 1",
+			input: `
+				p { true with http.send as mock_http_send }
+				mock_http_send(_) = { "body": "yay" }
+			`,
+			expected: `p { true with http.send as data.test.mock_http_send }`,
+		},
+		{
+			note: "built-in function: replaced by value",
+			input: `
+				p { true with http.send as { "body": "yay" } }
+			`,
+			expected: `p { true with http.send as {"body": "yay"} }`,
+		},
+		{
+			note: "built-in function: replaced by comprehension",
+			input: `
+				p { true with http.send as { x: true | x := ["a", "b"][_] } }
+			`,
+			expected: `p { __local2__ = {__local0__: true | __local1__ = ["a", "b"]; __local0__ = __local1__[_]}; true with http.send as __local2__ }`,
+		},
+		{
+			note: "built-in function: replaced by ref",
+			input: `
+				p { true with http.send as resp }
+				resp := { "body": "yay" }
+			`,
+			expected: `p { true with http.send as data.test.resp }`,
+		},
+		{
+			note: "built-in function: replaced by another built-in (ref)",
+			input: `
+				p { true with http.send as object.union_n }
+			`,
+			expected: `p { true with http.send as object.union_n }`,
+		},
+		{
+			note: "built-in function: replaced by another built-in (simple)",
+			input: `
+				p { true with http.send as count }
+			`,
+			expectedRule: func() *Rule {
+				r := MustParseRule(`p { true with http.send as count }`)
+				r.Body[0].With[0].Value.Value = Ref([]*Term{VarTerm("count")})
+				return r
+			}(),
+		},
+		{
+			note: "built-in function: replaced by another built-in that's marked unsafe",
+			input: `
+				q := is_object({"url": "https://httpbin.org", "method": "GET"})
+				p { q with is_object as http.send }
+			`,
+			opts:    func(c *Compiler) *Compiler { return c.WithUnsafeBuiltins(map[string]struct{}{"http.send": {}}) },
+			wantErr: fmt.Errorf("rego_compile_error: with keyword replacing built-in function: target must not be unsafe: \"http.send\""),
+		},
+		{
+			note: "non-built-in function: replaced by another built-in that's marked unsafe",
+			input: `
+			r(_) = {}
+			q := r({"url": "https://httpbin.org", "method": "GET"})
+			p {
+				q with r as http.send
+			}`,
+			opts:    func(c *Compiler) *Compiler { return c.WithUnsafeBuiltins(map[string]struct{}{"http.send": {}}) },
+			wantErr: fmt.Errorf("rego_compile_error: with keyword replacing built-in function: target must not be unsafe: \"http.send\""),
+		},
+		{
+			note: "built-in function: valid, arity 1, non-compound name",
+			input: `
+				p { concat("/", input) with concat as mock_concat }
+				mock_concat(_, _) = "foo/bar"
+			`,
+			expectedRule: func() *Rule {
+				r := MustParseRule(`p { concat("/", input) with concat as data.test.mock_concat }`)
+				r.Body[0].With[0].Target.Value = Ref([]*Term{VarTerm("concat")})
+				return r
+			}(),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler()
+			if tc.opts != nil {
+				c = tc.opts(c)
+			}
 			module := fixture + tc.input
 			c.Modules["test"] = MustParseModule(module)
 			compileStages(c, c.rewriteWithModifiers)
 			if tc.wantErr == nil {
 				assertNotFailed(t, c)
-				expected := MustParseRule(tc.expected)
+				expected := tc.expectedRule
+				if expected == nil {
+					expected = MustParseRule(tc.expected)
+				}
 				result := c.Modules["test"].Rules[1]
 				if result.Compare(expected) != 0 {
 					t.Fatalf("\nExp: %v\nGot: %v", expected, result)
@@ -4153,18 +4603,222 @@ func TestRewritePrintCallsWithElseImplicitArgs(t *testing.T) {
 }
 
 func TestCompilerMockFunction(t *testing.T) {
-	c := NewCompiler()
-	c.Modules["test"] = MustParseModule(`
-	package test
-
-	is_allowed(label) {
-	    label == "test_label"
+	tests := []struct {
+		note          string
+		module, extra string
+		err           string
+	}{
+		{
+			note: "simple valid",
+			module: `package test
+				now() = 123
+				p { true with time.now_ns as now }
+			`,
+		},
+		{
+			note: "simple valid, simple name",
+			module: `package test
+				mock_concat(_, _) = "foo/bar"
+				p { concat("/", input) with concat as mock_concat }
+			`,
+		},
+		{
+			note: "invalid ref: nonexistant",
+			module: `package test
+				p { true with time.now_ns as now }
+			`,
+			err: "rego_unsafe_var_error: var now is unsafe", // we're running all compiler stages here
+		},
+		{
+			note: "valid ref: not a function, but arity = 0",
+			module: `package test
+				now = 1
+				p { true with time.now_ns as now }
+			`,
+		},
+		{
+			note: "ref: not a function, arity > 0",
+			module: `package test
+				http_send = { "body": "nope" }
+				p { true with http.send as http_send }
+			`,
+		},
+		{
+			note: "invalid ref: arity mismatch",
+			module: `package test
+				http_send(_, _) = { "body": "nope" }
+				p { true with http.send as http_send }
+			`,
+			err: "rego_type_error: http.send: arity mismatch\n\thave: (any, any)\n\twant: (request: object[string: any])",
+		},
+		{
+			note: "invalid ref: arity mismatch (in call)",
+			module: `package test
+				http_send(_, _) = { "body": "nope" }
+				p { http.send({}) with http.send as http_send }
+			`,
+			err: "rego_type_error: http.send: arity mismatch\n\thave: (any, any)\n\twant: (request: object[string: any])",
+		},
+		{
+			note: "invalid ref: value another built-in with different type",
+			module: `package test
+				p { true with http.send as net.lookup_ip_addr }
+			`,
+			err: "rego_type_error: http.send: arity mismatch\n\thave: (string)\n\twant: (request: object[string: any])",
+		},
+		{
+			note: "ref: value another built-in with compatible type",
+			module: `package test
+				p { true with count as object.union_n }
+			`,
+		},
+		{
+			note: "valid: package import",
+			extra: `package mocks
+				http_send(_) = {}
+			`,
+			module: `package test
+				import data.mocks
+				p { true with http.send as mocks.http_send }
+			`,
+		},
+		{
+			note: "valid: function import",
+			extra: `package mocks
+				http_send(_) = {}
+			`,
+			module: `package test
+				import data.mocks.http_send
+				p { true with http.send as http_send }
+			`,
+		},
+		{
+			note: "invalid target: relation",
+			module: `package test
+				my_walk(_, _)
+				p { true with walk as my_walk }
+			`,
+			err: "rego_compile_error: with keyword replacing built-in function: target must not be a relation",
+		},
+		{
+			note: "invalid target: eq",
+			module: `package test
+				my_eq(_, _)
+				p { true with eq as my_eq }
+			`,
+			err: `rego_compile_error: with keyword replacing built-in function: replacement of "eq" invalid`,
+		},
+		{
+			note: "invalid target: rego.metadata.chain",
+			module: `package test
+				p { true with rego.metadata.chain as [] }
+			`,
+			err: `rego_compile_error: with keyword replacing built-in function: replacement of "rego.metadata.chain" invalid`,
+		},
+		{
+			note: "invalid target: rego.metadata.rule",
+			module: `package test
+				p { true with rego.metadata.rule as {} }
+			`,
+			err: `rego_compile_error: with keyword replacing built-in function: replacement of "rego.metadata.rule" invalid`,
+		},
+		{
+			note: "invalid target: internal.print",
+			module: `package test
+				my_print(_, _)
+				p { true with internal.print as my_print }
+			`,
+			err: `rego_compile_error: with keyword replacing built-in function: replacement of internal function "internal.print" invalid`,
+		},
+		{
+			note: "mocking custom built-in",
+			module: `package test
+				mock(_)
+				mock_mock(_)
+				p { bar(foo.bar("one")) with bar as mock with foo.bar as mock_mock }
+			`,
+		},
+		{
+			note: "non-built-in function replaced value",
+			module: `package test
+				original(_)
+				p { original(true) with original as 123 }
+			`,
+		},
+		{
+			note: "non-built-in function replaced by another, arity 0",
+			module: `package test
+				original() = 1
+				mock() = 2
+				p { original() with original as mock }
+			`,
+			err: "rego_type_error: undefined function data.test.original", // TODO(sr): file bug -- this doesn't depend on "with" used or not
+		},
+		{
+			note: "non-built-in function replaced by another, arity 1",
+			module: `package test
+				original(_)
+				mock(_)
+				p { original(true) with original as mock }
+			`,
+		},
+		{
+			note: "non-built-in function replaced by built-in",
+			module: `package test
+				original(_)
+				p { original([1]) with original as count }
+			`,
+		},
+		{
+			note: "non-built-in function replaced by another, arity mismatch",
+			module: `package test
+				original(_)
+				mock(_, _)
+				p { original([1]) with original as mock }
+			`,
+			err: "rego_type_error: data.test.original: arity mismatch\n\thave: (any, any)\n\twant: (any)",
+		},
+		{
+			note: "non-built-in function replaced by built-in, arity mismatch",
+			module: `package test
+				original(_)
+				p { original([1]) with original as concat }
+			`,
+			err: "rego_type_error: data.test.original: arity mismatch\n\thave: (string, any<array[string], set[string]>)\n\twant: (any)",
+		},
 	}
 
-	p {true with data.test.is_allowed as "blah" }
-	`)
-	compileStages(c, c.rewriteWithModifiers)
-	assertCompilerErrorStrings(t, c, []string{"rego_compile_error: with keyword cannot replace functions"})
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			c := NewCompiler().WithBuiltins(map[string]*Builtin{
+				"bar": {
+					Name: "bar",
+					Decl: types.NewFunction([]types.Type{types.S}, types.A),
+				},
+				"foo.bar": {
+					Name: "foo.bar",
+					Decl: types.NewFunction([]types.Type{types.S}, types.A),
+				},
+			})
+			if tc.extra != "" {
+				c.Modules["extra"] = MustParseModule(tc.extra)
+			}
+			c.Modules["test"] = MustParseModule(tc.module)
+
+			// NOTE(sr): We're running all compiler stages here, since the type checking of
+			// built-in function replacements happens at the type check stage.
+			c.Compile(c.Modules)
+
+			if tc.err != "" {
+				if !strings.Contains(c.Errors.Error(), tc.err) {
+					t.Errorf("expected error to contain %q, got %q", tc.err, c.Errors.Error())
+				}
+			} else if len(c.Errors) > 0 {
+				t.Errorf("expected no errors, got %v", c.Errors)
+			}
+		})
+	}
+
 }
 
 func TestCompilerMockVirtualDocumentPartially(t *testing.T) {
@@ -5515,7 +6169,7 @@ func TestCompilerWithStageAfterWithMetrics(t *testing.T) {
 	m := metrics.New()
 	c := NewCompiler().WithStageAfter(
 		"CheckRecursion",
-		CompilerStageDefinition{"MockStage", "mock_stage", mockStageFunctionCallNoErr},
+		CompilerStageDefinition{"MockStage", "mock_stage", func(*Compiler) *Error { return nil }},
 	)
 
 	c.WithMetrics(m)
@@ -5799,6 +6453,19 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 	}
 }
 
+func TestCompilerAllowMultipleAssignments(t *testing.T) {
+
+	_, err := CompileModules(map[string]string{"test.rego": `
+		package test
+
+		p := 7
+		p := 8
+	`})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestQueryCompiler(t *testing.T) {
 	tests := []struct {
 		note     string
@@ -5889,7 +6556,7 @@ func TestQueryCompiler(t *testing.T) {
 			q:        "x = 1 with foo.p as null",
 			pkg:      "",
 			imports:  nil,
-			expected: fmt.Errorf("1 error occurred: 1:12: rego_type_error: with keyword target must reference existing input or data"),
+			expected: fmt.Errorf("1 error occurred: 1:12: rego_type_error: with keyword target must reference existing input, data, or a function"),
 		},
 		{
 			note:     "rewrite with value",
@@ -5903,7 +6570,7 @@ func TestQueryCompiler(t *testing.T) {
 			q:        `startswith("x")`,
 			pkg:      "",
 			imports:  nil,
-			expected: fmt.Errorf("1 error occurred: 1:1: rego_type_error: startswith: arity mismatch\n\thave: (string)\n\twant: (string, string)"),
+			expected: fmt.Errorf("1 error occurred: 1:1: rego_type_error: startswith: arity mismatch\n\thave: (string)\n\twant: (search: string, base: string)"),
 		},
 		{
 			note:     "built-in function arity mismatch (arity 0)",
@@ -5917,7 +6584,7 @@ func TestQueryCompiler(t *testing.T) {
 			q:        "count(sum())",
 			pkg:      "",
 			imports:  nil,
-			expected: fmt.Errorf("1 error occurred: 1:7: rego_type_error: sum: arity mismatch\n\thave: (???)\n\twant: (any<array[number], set[number]>)"),
+			expected: fmt.Errorf("1 error occurred: 1:7: rego_type_error: sum: arity mismatch\n\thave: (???)\n\twant: (collection: any<array[number], set[number]>)"),
 		},
 		{
 			note:     "check types",
@@ -6049,7 +6716,7 @@ func TestQueryCompilerWithStageAfterWithMetrics(t *testing.T) {
 		QueryCompilerStageDefinition{
 			"MockStage",
 			"mock_stage",
-			func(qc QueryCompiler, b Body) (Body, error) {
+			func(_ QueryCompiler, b Body) (Body, error) {
 				return b, nil
 			},
 		})
@@ -6066,13 +6733,63 @@ func TestQueryCompilerWithStageAfterWithMetrics(t *testing.T) {
 }
 
 func TestQueryCompilerWithUnsafeBuiltins(t *testing.T) {
-	c := NewCompiler().WithUnsafeBuiltins(map[string]struct{}{
-		"count": {},
-	})
+	tests := []struct {
+		note     string
+		query    string
+		compiler *Compiler
+		opts     func(QueryCompiler) QueryCompiler
+		err      string
+	}{
+		{
+			note:     "builtin unsafe via compiler",
+			query:    "count([])",
+			compiler: NewCompiler().WithUnsafeBuiltins(map[string]struct{}{"count": {}}),
+			err:      "unsafe built-in function calls in expression: count",
+		},
+		{
+			note:     "builtin unsafe via query compiler",
+			query:    "count([])",
+			compiler: NewCompiler(),
+			opts: func(qc QueryCompiler) QueryCompiler {
+				return qc.WithUnsafeBuiltins(map[string]struct{}{"count": {}})
+			},
+			err: "unsafe built-in function calls in expression: count",
+		},
+		{
+			note:     "builtin unsafe via compiler, 'with' mocking",
+			query:    "is_array([]) with is_array as count",
+			compiler: NewCompiler().WithUnsafeBuiltins(map[string]struct{}{"count": {}}),
+			err:      `with keyword replacing built-in function: target must not be unsafe: "count"`,
+		},
+		{
+			note:     "builtin unsafe via query compiler,  'with' mocking",
+			query:    "is_array([]) with is_array as count",
+			compiler: NewCompiler(),
+			opts: func(qc QueryCompiler) QueryCompiler {
+				return qc.WithUnsafeBuiltins(map[string]struct{}{"count": {}})
+			},
+			err: `with keyword replacing built-in function: target must not be unsafe: "count"`,
+		},
+	}
 
-	_, err := c.QueryCompiler().WithUnsafeBuiltins(map[string]struct{}{}).Compile(MustParseBody("count([])"))
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			qc := tc.compiler.QueryCompiler()
+			if tc.opts != nil {
+				qc = tc.opts(qc)
+			}
+			_, err := qc.Compile(MustParseBody(tc.query))
+			var errs Errors
+			if !errors.As(err, &errs) {
+				t.Fatalf("expected error type %T, got %v %[2]T", errs, err)
+			}
+			if exp, act := 1, len(errs); exp != act {
+				t.Fatalf("expected %d error(s), got %d", exp, act)
+			}
+			if exp, act := tc.err, errs[0].Message; exp != act {
+				t.Errorf("expected message %q, got %q", exp, act)
+			}
+		})
 	}
 }
 
@@ -6195,14 +6912,6 @@ func assertNotFailed(t *testing.T, c *Compiler) {
 	if c.Failed() {
 		t.Fatalf("Unexpected compilation error: %v", c.Errors)
 	}
-}
-
-func mockStageFunctionCall(c *Compiler) *Error {
-	return NewError(CompileErr, &Location{}, "mock stage error")
-}
-
-func mockStageFunctionCallNoErr(c *Compiler) *Error {
-	return nil
 }
 
 func getCompilerWithParsedModules(mods map[string]string) *Compiler {
@@ -6473,869 +7182,389 @@ func TestCompilerPassesTypeCheckNegative(t *testing.T) {
 	}
 }
 
-func TestWithSchema(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, objectSchema)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("WithSchema did not set the schema correctly in the compiler")
-	}
-}
+func TestKeepModules(t *testing.T) {
 
-func TestAnyOfObjectSchema1(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, anyOfExtendCoreSchema)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("Did not correctly compile an object type schema with anyOf outside core schema")
-	}
-}
+	t.Run("no keep", func(t *testing.T) {
+		c := NewCompiler() // no keep is default
 
-func TestAnyOfObjectSchema2(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, anyOfInsideCoreSchema)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("Did not correctly compile an object type schema with anyOf inside core schema")
-	}
-}
+		// This one is overwritten by c.Compile()
+		c.Modules["foo.rego"] = MustParseModule("package foo\np = true")
 
-func TestAnyOfArraySchema(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, anyOfArraySchema)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("Did not correctly compile an array type schema with anyOf")
-	}
-}
+		c.Compile(map[string]*Module{"bar.rego": MustParseModule("package bar\np = input")})
 
-func TestAnyOfObjectMissing(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, anyOfObjectMissing)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("Did not correctly compile an object type schema with anyOf where one of the props did not explicitly claim type")
-	}
-}
+		if len(c.Errors) != 0 {
+			t.Fatalf("expected no error; got %v", c.Errors)
+		}
 
-func TestAnyOfArrayMissing(t *testing.T) {
-	c := NewCompiler()
-	schemaSet := NewSchemaSet()
-	schemaSet.Put(SchemaRootRef, anyOfArrayMissing)
-	c.WithSchemas(schemaSet)
-	if c.schemaSet == nil {
-		t.Fatalf("Did not correctly compile an array type schema with anyOf where items are inside anyOf")
-	}
-}
+		mods := c.ParsedModules()
+		if mods != nil {
+			t.Errorf("expected ParsedModules == nil, got %v", mods)
+		}
+	})
 
-const objectSchema = `{
-	"$schema": "http://json-schema.org/draft-07/schema",
-	"$id": "http://example.com/example.json",
-	"type": "object",
-	"title": "The root schema",
-	"description": "The root schema comprises the entire JSON document.",
-	"required": [
-		"foo",
-		"b"
-	],
-	"properties": {
-		"foo": {
-			"$id": "#/properties/foo",
-			"type": "string",
-			"title": "The foo schema",
-			"description": "An explanation about the purpose of this instance."
-		},
-		"b": {
-			"$id": "#/properties/b",
-			"type": "array",
-			"title": "The b schema",
-			"description": "An explanation about the purpose of this instance.",
-			"additionalItems": false,
-			"items": {
-				"$id": "#/properties/b/items",
-				"type": "object",
-				"title": "The items schema",
-				"description": "An explanation about the purpose of this instance.",
-				"required": [
-					"a",
-					"b",
-					"c"
-				],
-				"properties": {
-					"a": {
-						"$id": "#/properties/b/items/properties/a",
-						"type": "integer",
-						"title": "The a schema",
-						"description": "An explanation about the purpose of this instance."
-					},
-					"b": {
-						"$id": "#/properties/b/items/properties/b",
-						"type": "array",
-						"title": "The b schema",
-						"description": "An explanation about the purpose of this instance.",
-						"additionalItems": false,
-						"items": {
-							"$id": "#/properties/b/items/properties/b/items",
-							"type": "integer",
-							"title": "The items schema",
-							"description": "An explanation about the purpose of this instance."
-						}
-					},
-					"c": {
-						"$id": "#/properties/b/items/properties/c",
-						"type": "null",
-						"title": "The c schema",
-						"description": "An explanation about the purpose of this instance."
-					}
-				},
-				"additionalProperties": false
+	t.Run("keep", func(t *testing.T) {
+
+		c := NewCompiler().WithKeepModules(true)
+
+		// This one is overwritten by c.Compile()
+		c.Modules["foo.rego"] = MustParseModule("package foo\np = true")
+
+		c.Compile(map[string]*Module{"bar.rego": MustParseModule("package bar\np = input")})
+		if len(c.Errors) != 0 {
+			t.Fatalf("expected no error; got %v", c.Errors)
+		}
+
+		mods := c.ParsedModules()
+		if exp, act := 1, len(mods); exp != act {
+			t.Errorf("expected %d modules, found %d: %v", exp, act, mods)
+		}
+		for k := range mods {
+			if k != "bar.rego" {
+				t.Errorf("unexpected key: %v, want 'bar.rego'", k)
 			}
 		}
-	},
-	"additionalProperties": false
-}`
 
-const arrayNoItemsSchema = `{
-	"$schema": "http://json-schema.org/draft-07/schema",
-	"$id": "http://example.com/example.json",
-	"type": "object",
-	"title": "The root schema",
-	"description": "The root schema comprises the entire JSON document.",
-	"required": [
-		"b"
-	],
-	"properties": {
-		"b": {
-			"$id": "#/properties/b",
-			"type": "array",
-			"title": "The b schema",
-			"description": "An explanation about the purpose of this instance.",
-			"additionalItems": true
+		for k := range mods {
+			compiled := c.Modules[k]
+			if compiled.Equal(mods[k]) {
+				t.Errorf("expected module %v to not be compiled: %v", k, mods[k])
+			}
 		}
-	},
-	"additionalProperties": false
-}`
 
-const noChildrenObjectSchema = `{
-	"$schema": "http://json-schema.org/draft-07/schema",
-	"$id": "http://example.com/example.json",
-	"type": "object",
-	"title": "The root schema",
-	"description": "The root schema comprises the entire JSON document.",
-	"additionalProperties": true
-}`
-
-const untypedFieldObjectSchema = `{
-	"$schema": "http://json-schema.org/draft-07/schema",
-	"$id": "http://example.com/example.json",
-	"type": "object",
-	"title": "The root schema",
-	"description": "The root schema comprises the entire JSON document.",
-	"required": [
-		"foo"
-	],
-	"properties": {
-		"foo": {
-			"$id": "#/properties/foo"
+		// expect ParsedModules to be reset
+		c.Compile(map[string]*Module{"baz.rego": MustParseModule("package baz\np = input")})
+		mods = c.ParsedModules()
+		if exp, act := 1, len(mods); exp != act {
+			t.Errorf("expected %d modules, found %d: %v", exp, act, mods)
 		}
-	},
-	"additionalProperties": false
-}`
-
-const booleanSchema = `{
-	"$schema": "http://json-schema.org/draft-07/schema",
-	"$id": "http://example.com/example.json",
-	"type": "object",
-	"title": "The root schema",
-	"description": "The root schema comprises the entire JSON document.",
-	"required": [
-		"a"
-	],
-	"properties": {
-		"a": {
-			"$id": "#/properties/foo",
-			"type": "boolean",
-			"title": "The foo schema",
-			"description": "An explanation about the purpose of this instance."
+		for k := range mods {
+			if k != "baz.rego" {
+				t.Errorf("unexpected key: %v, want 'baz.rego'", k)
+			}
 		}
-	},
-	"additionalProperties": false
+
+		for k := range mods {
+			compiled := c.Modules[k]
+			if compiled.Equal(mods[k]) {
+				t.Errorf("expected module %v to not be compiled: %v", k, mods[k])
+			}
+		}
+
+		// expect ParsedModules to be reset to nil
+		c = c.WithKeepModules(false)
+		c.Compile(map[string]*Module{"baz.rego": MustParseModule("package baz\np = input")})
+		mods = c.ParsedModules()
+		if mods != nil {
+			t.Errorf("expected ParsedModules == nil, got %v", mods)
+		}
+	})
+
+	t.Run("no copies", func(t *testing.T) {
+		extra := MustParseModule("package extra\np = input")
+		done := false
+		testLoader := func(map[string]*Module) (map[string]*Module, error) {
+			if done {
+				return nil, nil
+			}
+			done = true
+			return map[string]*Module{"extra.rego": extra}, nil
+		}
+
+		c := NewCompiler().WithModuleLoader(testLoader).WithKeepModules(true)
+
+		mod := MustParseModule("package bar\np = input")
+		c.Compile(map[string]*Module{"bar.rego": mod})
+		if len(c.Errors) != 0 {
+			t.Fatalf("expected no error; got %v", c.Errors)
+		}
+
+		mods := c.ParsedModules()
+		if exp, act := 2, len(mods); exp != act {
+			t.Errorf("expected %d modules, found %d: %v", exp, act, mods)
+		}
+		newName := Var("q")
+		mods["bar.rego"].Rules[0].Head.Name = newName
+		if exp, act := newName, mod.Rules[0].Head.Name; !exp.Equal(act) {
+			t.Errorf("expected modified rule name %v, found %v", exp, act)
+		}
+		mods["extra.rego"].Rules[0].Head.Name = newName
+		if exp, act := newName, extra.Rules[0].Head.Name; !exp.Equal(act) {
+			t.Errorf("expected modified rule name %v, found %v", exp, act)
+		}
+	})
+
+	t.Run("keep, with loader", func(t *testing.T) {
+		extra := MustParseModule("package extra\np = input")
+		done := false
+		testLoader := func(map[string]*Module) (map[string]*Module, error) {
+			if done {
+				return nil, nil
+			}
+			done = true
+			return map[string]*Module{"extra.rego": extra}, nil
+		}
+
+		c := NewCompiler().WithModuleLoader(testLoader).WithKeepModules(true)
+
+		// This one is overwritten by c.Compile()
+		c.Modules["foo.rego"] = MustParseModule("package foo\np = true")
+
+		c.Compile(map[string]*Module{"bar.rego": MustParseModule("package bar\np = input")})
+
+		if len(c.Errors) != 0 {
+			t.Fatalf("expected no error; got %v", c.Errors)
+		}
+
+		mods := c.ParsedModules()
+		if exp, act := 2, len(mods); exp != act {
+			t.Errorf("expected %d modules, found %d: %v", exp, act, mods)
+		}
+		for k := range mods {
+			if k != "bar.rego" && k != "extra.rego" {
+				t.Errorf("unexpected key: %v, want 'extra.rego' and 'bar.rego'", k)
+			}
+		}
+
+		for k := range mods {
+			compiled := c.Modules[k]
+			if compiled.Equal(mods[k]) {
+				t.Errorf("expected module %v to not be compiled: %v", k, mods[k])
+			}
+		}
+	})
+}
+
+// see https://github.com/open-policy-agent/opa/issues/5166
+func TestCompilerWithRecursiveSchema(t *testing.T) {
+
+	jsonSchema := `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/open-policy-agent/opa/issues/5166",
+  "type": "object",
+  "properties": {
+    "Something": {
+      "$ref": "#/$defs/X"
+    }
+  },
+  "$defs": {
+    "X": {
+      "type": "object",
+      "properties": {
+		"Name": { "type": "string" },
+        "Y": {
+          "$ref": "#/$defs/Y"
+        }
+      }
+    },
+    "Y": {
+      "type": "object",
+      "properties": {
+        "X": {
+          "$ref": "#/$defs/X"
+        }
+      }
+    }
+  }
 }`
 
-const refSchema = `
-{
-    "description": "Pod is a collection of containers that can run on a host. This resource is created by clients and scheduled onto hosts.",
-	"type": "object",
-	"properties": {
-      "apiVersion": {
-        "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources",
-        "type": [
-          "string",
-          "null"
-        ]
-	  },
+	exampleModule := `# METADATA
+# schemas:
+# - input: schema.input
+package opa.recursion
 
-      "kind": {
-        "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds",
-        "type": [
-          "string",
-          "null"
-        ],
-        "enum": [
-          "Pod"
-        ]
-      },
-      "metadata": {
-        "$ref": "https://kubernetesjsonschema.dev/v1.14.0/_definitions.json#/definitions/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta",
-        "description": "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#metadata"
-	  }
-	}
+deny {
+	input.Something.Y.X.Name == "Something"
 }
 `
-const podSchema = `
-{
-    "description": "Pod is a collection of containers that can run on a host. This resource is created by clients and scheduled onto hosts.",
-    "properties": {
-      "apiVersion": {
-        "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources",
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "kind": {
-        "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds",
-        "type": [
-          "string",
-          "null"
-        ],
-        "enum": [
-          "Pod"
-        ]
-      },
-      "metadata": {
-        "$ref": "https://kubernetesjsonschema.dev/v1.14.0/_definitions.json#/definitions/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta",
-        "description": "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#metadata"
-      },
-      "spec": {
-        "$ref": "https://kubernetesjsonschema.dev/v1.14.0/_definitions.json#/definitions/io.k8s.api.core.v1.PodSpec",
-        "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#spec-and-status"
-      },
-      "status": {
-        "$ref": "https://kubernetesjsonschema.dev/v1.14.0/_definitions.json#/definitions/io.k8s.api.core.v1.PodStatus",
-        "description": "Most recently observed status of the pod. This data may not be up to date. Populated by the system. Read-only. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#spec-and-status"
+
+	c := NewCompiler()
+	var schema interface{}
+	if err := json.Unmarshal([]byte(jsonSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	schemaSet := NewSchemaSet()
+	schemaSet.Put(MustParseRef("schema.input"), schema)
+	c.WithSchemas(schemaSet)
+
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	c.Compile(map[string]*Module{"testMod": m})
+	if c.Failed() {
+		t.Errorf("Expected compilation to succeed, but got errors: %v", c.Errors)
+	}
+}
+
+// see https://github.com/open-policy-agent/opa/issues/5166
+func TestCompilerWithRecursiveSchemaAndInvalidSource(t *testing.T) {
+
+	jsonSchema := `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/open-policy-agent/opa/issues/5166",
+  "type": "object",
+  "properties": {
+    "Something": {
+      "$ref": "#/$defs/X"
+    }
+  },
+  "$defs": {
+    "X": {
+      "type": "object",
+      "properties": {
+		"Name": { "type": "string" },
+        "Y": {
+          "$ref": "#/$defs/Y"
+        }
       }
     },
-    "type": "object",
-    "x-kubernetes-group-version-kind": [
-      {
-        "group": "",
-        "kind": "Pod",
-        "version": "v1"
+    "Y": {
+      "type": "object",
+      "properties": {
+        "X": {
+          "$ref": "#/$defs/X"
+        }
       }
-    ],
-    "$schema": "http://json-schema.org/schema#"
-  }`
+    }
+  }
+}`
 
-const anyOfArraySchema = `{
-	"type": "object",
-	"properties": {
-		"familyMembers": {
-			"type": "array",
-			"items": {
-				"anyOf": [
-					{
-						"type": "object",
-						"properties": {
-							"age": { "type": "integer" },
-							"name": {"type": "string"}
-						}
-					},{
-						"type": "object",
-						"properties": {
-							"personality": { "type": "string" },
-							"nickname": { "type": "string"  }
-						}
-					}
-				]
-			}
-		}
+	exampleModule := `# METADATA
+# schemas:
+# - input: schema.input
+package opa.recursion
+
+deny {
+	input.Something.Y.X.ThisDoesNotExist == "Something"
+}
+`
+
+	c := NewCompiler()
+	var schema interface{}
+	if err := json.Unmarshal([]byte(jsonSchema), &schema); err != nil {
+		t.Fatal(err)
 	}
-}`
+	schemaSet := NewSchemaSet()
+	schemaSet.Put(MustParseRef("schema.input"), schema)
+	c.WithSchemas(schemaSet)
 
-const anyOfExtendCoreSchema = `{
-	"type": "object",
-	"properties": {
-		"AddressLine": { "type": "string" }
-	},
-	"anyOf": [
-		{
-			"type": "object",
-			"properties": {
-				"State":   { "type": "string" },
-				"ZipCode": { "type": "string" }
-			}
-		},
-		{
-			"type": "object",
-			"properties": {
-				"County":   { "type": "string" },
-				"PostCode": { "type": "integer" }
-			}
-		}
-	]
-}`
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	c.Compile(map[string]*Module{"testMod": m})
+	if !c.Failed() {
+		t.Errorf("Expected compilation to fail, but it succeeded")
+	} else if !strings.HasPrefix(c.Errors.Error(), "1 error occurred: 7:2: rego_type_error: undefined ref: input.Something.Y.X.ThisDoesNotExist") {
+		t.Errorf("unexpected error: %v", c.Errors.Error())
+	}
 
-const allOfObjectSchema = `{
-    "$schema": "http://json-schema.org/draft-04/schema#",
-    "type": "object",
-    "title": "My schema",
-    "properties": {
-        "AddressLine1": { "type": "string" },
-        "AddressLine2": { "type": "string" },
-        "City":         { "type": "string" }
+}
+
+func TestCompilerWithRecursiveSchemaAvoidRace(t *testing.T) {
+
+	jsonSchema := `{
+  "type": "object",
+  "properties": {
+    "aws": {
+      "type": "object",
+      "$ref": "#/$defs/example.pkg.providers.aws.AWS"
+    }
+  },
+  "$defs": {
+    "example.pkg.providers.aws.AWS": {
+      "type": "object",
+      "properties": {
+        "iam": {
+          "type": "object",
+          "$ref": "#/$defs/example.pkg.providers.aws.iam.IAM"
+        },
+        "sqs": {
+          "type": "object",
+          "$ref": "#/$defs/example.pkg.providers.aws.sqs.SQS"
+        }
+      }
     },
-    "allOf": [
-        {
+    "example.pkg.providers.aws.iam.Document": {
+      "type": "object"
+    },
+    "example.pkg.providers.aws.iam.IAM": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
             "type": "object",
-            "properties": {
-                "State":   { "type": "string" },
-                "ZipCode": { "type": "string" }
-            },
-        },
-        {
-            "type": "object",
-            "properties": {
-                "County":   { "type": "string" },
-                "PostCode": { "type": "string" }
-            },
+            "$ref": "#/$defs/example.pkg.providers.aws.iam.Policy"
+          }
         }
-    ]
-}`
-
-const allOfArraySchema = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "array",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"items": {
-		"type": "integer",
-		"title": "The items schema",
-		"description": "An explanation about the purpose of this instance."
-	},
-	"allOf": [
-		{
-		"type": "array",
-		"title": "The b schema",
-		"description": "An explanation about the purpose of this instance.",
-		"items": {
-			"type": "integer",
-			"title": "The items schema",
-			"description": "An explanation about the purpose of this instance."
-		}
-		},
-		{
-		"type": "array",
-		"title": "The b schema",
-		"description": "An explanation about the purpose of this instance.",
-		"items": {
-			"type": "integer",
-			"title": "The items schema",
-			"description": "An explanation about the purpose of this instance."
-		}
-		}
-	]
-}`
-
-const allOfSchemaParentVariation = `{
-    "$schema": "http://json-schema.org/draft-04/schema#",
-    "allOf": [
-        {
-            "type": "object",
-            "properties": {
-                "State":   { "type": "string" },
-                "ZipCode": { "type": "string" }
-            },
+      }
+    },
+    "example.pkg.providers.aws.iam.Policy": {
+      "type": "object",
+      "properties": {
+        "builtin": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            }
+          }
         },
-        {
-            "type": "object",
-            "properties": {
-                "County":   { "type": "string" },
-                "PostCode": { "type": "string" }
-            },
+        "document": {
+          "type": "object",
+          "$ref": "#/$defs/example.pkg.providers.aws.iam.Document"
         }
-    ]
-}`
-
-const emptySchema = `{
-	"allof" : []
- }`
-
-const allOfArrayOfArrays = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "array",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"items": {
-		"type": "array",
-		"title": "The items schema",
-		"description": "An explanation about the purpose of this instance.",
-		"items": {
-			"type": "integer",
-			"title": "The items schema",
-			"description": "An explanation about the purpose of this instance."
-		}
-	},
-	"allOf": [{
-			"type": "array",
-			"title": "The b schema",
-			"description": "An explanation about the purpose of this instance.",
-			"items": {
-				"type": "array",
-				"title": "The items schema",
-				"description": "An explanation about the purpose of this instance.",
-				"items": {
-					"type": "integer",
-					"title": "The items schema",
-					"description": "An explanation about the purpose of this instance."
-				}
-			}
-		},
-		{
-			"type": "array",
-			"title": "The b schema",
-			"description": "An explanation about the purpose of this instance.",
-			"items": {
-				"type": "integer",
-				"title": "The items schema",
-				"description": "An explanation about the purpose of this instance."
-			}
-		}
-	]
-}`
-
-const anyOfInsideCoreSchema = ` {
-	"type": "object",
-	"properties": {
-		"AddressLine": { "type": "string" },
-		"RandomInfo": {
-			"anyOf": [
-				{ "type": "object",
-				  "properties": {
-					  "accessMe": {"type": "string"}
-				  }
-				},
-				{ "type": "number", "minimum": 0 }
-			  ]
-		}
-	}
-}`
-
-const anyOfObjectMissing = `{
-	"type": "object",
-	"properties": {
-		"AddressLine": { "type": "string" }
-	},
-	"anyOf": [
-		{
-			"type": "object",
-			"properties": {
-				"State":   { "type": "string" },
-				"ZipCode": { "type": "string" }
-			}
-		},
-		{
-			"properties": {
-				"County":   { "type": "string" },
-				"PostCode": { "type": "integer" }
-			}
-		}
-	]
-}`
-
-const allOfArrayOfObjects = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "array",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"items": {
-		"type": "object",
-		"title": "The items schema",
-		"description": "An explanation about the purpose of this instance.",
-		"properties": {
-			"State": {
-				"type": "string"
-			},
-			"ZipCode": {
-				"type": "string"
-			}
-		},
-		"allOf": [{
-				"type": "object",
-				"title": "The b schema",
-				"description": "An explanation about the purpose of this instance.",
-				"properties": {
-					"County": {
-						"type": "string"
-					},
-					"PostCode": {
-						"type": "string"
-					}
-				}
-			},
-			{
-				"type": "object",
-				"title": "The b schema",
-				"description": "An explanation about the purpose of this instance.",
-				"properties": {
-					"Street": {
-						"type": "string"
-					},
-					"House": {
-						"type": "string"
-					}
-				}
-			}
-		]
-	}
-}`
-
-const allOfObjectAndArray = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "object",
-	"title": "My schema",
-	"properties": {
-		"AddressLine1": {
-			"type": "string"
-		},
-		"AddressLine2": {
-			"type": "string"
-		},
-		"City": {
-			"type": "string"
-		}
-	},
-	"allOf": [{
-			"type": "object",
-			"properties": {
-				"State": {
-					"type": "string"
-				},
-				"ZipCode": {
-					"type": "string"
-				}
-			}
-		},
-		{
-			"type": "array",
-			"title": "The b schema",
-			"description": "An explanation about the purpose of this instance.",
-			"items": {
-				"type": "integer",
-				"title": "The items schema",
-				"description": "An explanation about the purpose of this instance."
-			}
-		}
-	]
-}`
-
-const allOfObjectMissing = `{
-	"type": "object",
-	"properties": {
-		"AddressLine": { "type": "string" }
-	},
-	"allOf": [
-		{
-			"type": "object",
-			"properties": {
-				"State":   { "type": "string" },
-				"ZipCode": { "type": "string" }
-			}
-		},
-		{
-			"properties": {
-				"County":   { "type": "string" },
-				"PostCode": { "type": "integer" }
-			}
-		}
-	]
-}`
-
-const allOfArrayDifTypes = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "array",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "array",
-			"items": [{
-					"type": "string"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		},
-		{
-			"type": "array",
-			"items": [{
-					"type": "string"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		}
-	]
-}`
-
-const allOfArrayInsideObject = `{
-	"type": "object",
-	"properties": {
-		"familyMembers": {
-			"type": "array",
-			"items": {
-				"allOf": [{
-					"type": "object",
-					"properties": {
-						"age": {
-							"type": "integer"
-						},
-						"name": {
-							"type": "string"
-						}
-					}
-				}, {
-					"type": "object",
-					"properties": {
-						"personality": {
-							"type": "string"
-						},
-						"nickname": {
-							"type": "string"
-						}
-					}
-				}]
-			}
-		}
-	}
-}`
-
-const anyOfArrayMissing = `{
-	"type": "array",
-	"anyOf": [
-		{
-			"items": [
-				{"type": "number"},
-				{"type": "string"}]
-            },
-		{	"items": [
-				{"type": "integer"}]
-		}
-	]
-}`
-
-const allOfArrayMissing = `{
-	"type": "array",
-	"allOf": [{
-			"items": [{
-					"type": "integer"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		},
-		{
-			"items": [{
-				"type": "integer"
-			}]
-		}
-	]
-}`
-
-const anyOfSchemaParentVariation = `{
-    "$schema": "http://json-schema.org/draft-04/schema#",
-    "anyOf": [
-        {
+      }
+    },
+    "example.pkg.providers.aws.sqs.Queue": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
             "type": "object",
-            "properties": {
-                "State":   { "type": "string" },
-                "ZipCode": { "type": "string" }
-            },
-        },
-        {
-            "type": "object",
-            "properties": {
-                "County":   { "type": "string" },
-                "PostCode": { "type": "string" }
-            },
+            "$ref": "#/$defs/example.pkg.providers.aws.iam.Policy"
+          }
         }
-    ]
+      }
+    },
+    "example.pkg.providers.aws.sqs.SQS": {
+      "type": "object",
+      "properties": {
+        "queues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/$defs/example.pkg.providers.aws.sqs.Queue"
+          }
+        }
+      }
+    }
+  }
+}`
+
+	exampleModule := `# METADATA
+# schemas:
+#  - input: schema.input
+package race.condition
+
+deny {
+	queue := input.aws.sqs.queues[_]
+	policy := queue.policies[_]
+	doc := json.unmarshal(policy.document.value)
+	statement = doc.Statement[_]
+	action := statement.Action[_]
+	action == "*"
+}
+`
+
+	c := NewCompiler()
+	var schema interface{}
+	if err := json.Unmarshal([]byte(jsonSchema), &schema); err != nil {
+		t.Fatal(err)
 	}
-}`
+	schemaSet := NewSchemaSet()
+	schemaSet.Put(MustParseRef("schema.input"), schema)
+	c.WithSchemas(schemaSet)
 
-const allOfInsideCoreSchema = `{
-	"type": "object",
-	"properties": {
-		"AddressLine": { "type": "string" },
-		"RandomInfo": {
-			"allOf": [
-				{ "type": "object",
-				  "properties": {
-					  "accessMe": {"type": "string"}
-				  }
-				},
-				{ "type": "object",
-					"properties": {
-						"accessYou": {"type": "string"}
-					}}
-			  ]
-		}
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	c.Compile(map[string]*Module{"testMod": m})
+	if c.Failed() {
+		t.Fatal(c.Errors)
 	}
-}`
-
-const allOfArrayDifTypesWithError = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "array",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "array",
-			"items": [{
-					"type": "string"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		},
-		{
-			"type": "array",
-			"items": [{
-					"type": "boolean"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		}
-	]
-}`
-
-const allOfStringSchema = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "string",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "string",
-		},
-		{
-			"type": "string",
-		}
-	]
-}`
-
-const allOfIntegerSchema = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "integer",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "integer",
-		},
-		{
-			"type": "integer",
-		}
-	]
-}`
-
-const allOfBooleanSchema = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "boolean",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "boolean",
-		},
-		{
-			"type": "boolean",
-		}
-	]
-}`
-
-const allOfTypeErrorSchema = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "string",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "string",
-		},
-		{
-			"type": "integer",
-		}
-	]
-}`
-
-const allOfStringSchemaWithError = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "string",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "string",
-		},
-		{
-			"type": "string",
-		},
-		{
-			"type": "boolean",
-		}
-	]
-}`
-
-const allOfSchemaWithParentError = `{
-	"$schema": "http://json-schema.org/draft-04/schema#",
-	"type": "string",
-	"title": "The b schema",
-	"description": "An explanation about the purpose of this instance.",
-	"allOf": [{
-			"type": "integer",
-		},
-		{
-			"type": "integer",
-		}
-	]
-}`
-
-const allOfSchemaWithUnevenArray = `{
-	"type": "array",
-	"allOf": [{
-			"items": [{
-					"type": "integer"
-				},
-				{
-					"type": "integer"
-				}
-			]
-		},
-		{
-			"items": [{
-				"type": "integer"
-			},
-			{
-				"type": "integer"
-			},
-			{
-				"type": "string"
-			}]
-		}
-	]
-}`
+}

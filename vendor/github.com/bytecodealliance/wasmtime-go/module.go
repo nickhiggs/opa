@@ -3,8 +3,9 @@ package wasmtime
 // #include "shims.h"
 // #include <stdlib.h>
 import "C"
+
 import (
-	"io/ioutil"
+	"os"
 	"runtime"
 	"unsafe"
 )
@@ -45,7 +46,7 @@ func NewModule(engine *Engine, wasm []byte) (*Module, error) {
 //
 // Afterwards delegates to the `NewModule` constructor with the contents read.
 func NewModuleFromFile(engine *Engine, file string) (*Module, error) {
-	wasm, err := ioutil.ReadFile(file)
+	wasm, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +59,6 @@ func NewModuleFromFile(engine *Engine, file string) (*Module, error) {
 		}
 	}
 	return NewModule(engine, wasm)
-
 }
 
 // ModuleValidate validates whether `wasm` would be a valid wasm module according to the
@@ -92,11 +92,22 @@ func (m *Module) ptr() *C.wasmtime_module_t {
 	return ret
 }
 
-// Type returns a `ModuleType` that corresponds for this module.
-func (m *Module) Type() *ModuleType {
-	ptr := C.wasmtime_module_type(m.ptr())
+// Imports returns a list of `ImportType` which are the items imported by
+// this module and are required for instantiation
+func (m *Module) Imports() []*ImportType {
+	imports := &importTypeList{}
+	C.wasmtime_module_imports(m.ptr(), &imports.vec)
 	runtime.KeepAlive(m)
-	return mkModuleType(ptr, nil)
+	return imports.mkGoList()
+}
+
+// Exports returns a list of `ExportType` which are the items that will be
+// exported by this module after instantiation.
+func (m *Module) Exports() []*ExportType {
+	exports := &exportTypeList{}
+	C.wasmtime_module_exports(m.ptr(), &exports.vec)
+	runtime.KeepAlive(m)
+	return exports.mkGoList()
 }
 
 type importTypeList struct {
@@ -208,10 +219,4 @@ func (m *Module) Serialize() ([]byte, error) {
 	ret := C.GoBytes(unsafe.Pointer(retVec.data), C.int(retVec.size))
 	C.wasm_byte_vec_delete(&retVec)
 	return ret, nil
-}
-
-func (m *Module) AsExtern() C.wasmtime_extern_t {
-	ret := C.wasmtime_extern_t{kind: C.WASMTIME_EXTERN_MODULE}
-	C.go_wasmtime_extern_module_set(&ret, m.ptr())
-	return ret
 }

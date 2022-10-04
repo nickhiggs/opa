@@ -88,7 +88,7 @@ Example using `BASE_URL` and `BEARER_TOKEN` environment variables:
 ```yaml
 services:
   acmecorp:
-    url: ${BASE_URL}
+    url: "${BASE_URL}"
     credentials:
       bearer:
         token: "${BEARER_TOKEN}"
@@ -252,17 +252,61 @@ multiple services.
 | `services[_].tls.ca_cert` | `string` | No | The path to the root CA certificate.  If not provided, this defaults to TLS using the host's root CA set. |
 | `services[_].tls.system_ca_required` | `bool` | No (default: `false`) | Require system certificate appended with root CA certificate. |
 | `services[_].allow_insecure_tls` | `bool` | No | Allow insecure TLS. |
+| `services[_].type` | `string` | No (default: empty) | Optional parameter that allows to use an "OCI" service type. This will allow bundle and discovery plugins to download bundles from an OCI registry. |
+
+> Services can be defined as an array or object. When defined as an object, the
+> object keys override the `services[_].name` fields.
+> For example:
+> ```yaml
+> services:
+>   s1:
+>     url: https://s1/example/
+>   s2:
+>     url: https://s2/
+> ```
+> Is equivalent to
+> ```yaml
+> services:
+>   - name: s1
+>     url: https://s1/example/
+>   - name: s2
+>     url: https://s2/
+> ```
 
 Each service may optionally specify a credential mechanism by which OPA will authenticate
 itself to the service.
+
+##### Example
+
+Using an OCI service type to download a bundle from an OCI repository.
+
+```yaml
+services:
+  ghcr-registry:
+    url: https://ghcr.io
+    type: oci
+
+bundles:
+  authz:
+    service: ghcr-registry
+    resource: ghcr.io/${ORGANIZATION}/${REPOSITORY}:${TAG}
+    persist: true
+    polling:
+      min_delay_seconds: 60
+      max_delay_seconds: 120
+
+persistence_directory: ${PERSISTENCE_PATH}
+```
+
+When using an OCI service type the downloader uses the persistence path to store the layers of the downloaded repository. This storage path should be maintained by the user. 
+If persistence is not configured the OCI downloader will store the layers in the system's temporary directory to allow automatic cleanup on system restart. 
 
 #### Bearer Token
 
 OPA will authenticate using the specified bearer token and schema; to enable bearer token
 authentication, either the token or the path to the token must be specified. If the latter is provided, on each request OPA will re-read the token from the file and use that token for authentication.
 
-The schema is optional and will default to `Bearer`
-if unspecified.
+The `scheme` attribute is optional, and will default to `Bearer` if unspecified.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -426,7 +470,6 @@ Please note that if you are using temporary IAM credentials (e.g. assumed IAM ro
 | --- | --- | --- | --- |
 | `services[_].credentials.s3_signing.environment_credentials` | `{}` | Yes | Enables AWS signing using environment variables to source the configuration and credentials |
 
-
 ##### Using Named Profile Credentials
 If specifying `profile_credentials`, OPA will expect to find the `access key id`, `secret access key` and
 `session token` from the [named profiles](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-profiles.html)
@@ -437,7 +480,7 @@ request OPA will re-read the credentials from the file and use them for authenti
 | --- | --- | --- | --- |
 | `services[_].credentials.s3_signing.profile_credentials.path` | `string` | No | The path to the shared credentials file. If empty, OPA will look for the `AWS_SHARED_CREDENTIALS_FILE` env variable. If the variable is not set, the path defaults to the current user's home directory. `~/.aws/credentials` (Linux & Mac) or `%USERPROFILE%\.aws\credentials` (Windows) |
 | `services[_].credentials.s3_signing.profile_credentials.profile` | `string` | No | AWS Profile to extract credentials from the credentials file. If empty, OPA will look for the `AWS_PROFILE` env variable. If the variable is not set, the `default` profile will be used |
-| `services[_].credentials.s3_signing.metadata_credentials.aws_region` | `string` | No | The AWS region to use for the AWS signing service credential method. If unset, the `AWS_REGION` environment variable must be set |
+| `services[_].credentials.s3_signing.profile_credentials.aws_region` | `string` | No | The AWS region to use for the AWS signing service credential method. If unset, the `AWS_REGION` environment variable must be set |
 
 ##### Using EC2 Metadata Credentials
 If specifying `metadata_credentials`, OPA will use the AWS metadata services for [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html)
@@ -450,9 +493,9 @@ be specified as `iam_role` and `aws_region` respectively.
 To use the ECS metadata service, specify only the AWS region for the resource as `aws_region`. ECS
 containers have at most one associated IAM role.
 
-**N.B.** Providing a value for `iam_role` will cause OPA to use the EC2 metadata service even
-if running inside an ECS container. This may result in unexpected problems if, for example,
-there is no route to the EC2 metadata service from inside the container or if the IAM role is only available within the container and not from the hosting EC2 instance.
+> Providing a value for `iam_role` will cause OPA to use the EC2 metadata service even
+> if running inside an ECS container. This may result in unexpected problems if, for example,
+> there is no route to the EC2 metadata service from inside the container or if the IAM role is only available within the container and not from the hosting EC2 instance.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -460,31 +503,12 @@ there is no route to the EC2 metadata service from inside the container or if th
 | `services[_].credentials.s3_signing.metadata_credentials.iam_role` | `string` | No | The IAM role to use for the AWS signing service credential method |
 
 ##### Using EKS IAM Roles for Service Account (Web Identity) Credentials
-If specifying `web_identity_credentials`, OPA will expect to find environment variables for `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, in accordance with the convention used by the [AWS EKS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts-technical-overview.html#pod-configuration).
+If specifying `web_identity_credentials`, OPA will expect to find environment variables for `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, in accordance with the convention used by the [AWS EKS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `services[_].credentials.s3_signing.web_identity_credentials.aws_region` | `string` | Yes | The AWS region to use for the sts regional endpoint. Uses the global endpoint by default |
 | `services[_].credentials.s3_signing.web_identity_credentials.session_name` | `string` | No | The session name used to identify the assumed role session. Default: `open-policy-agent` |
-
-> Services can be defined as an array or object. When defined as an object, the
-> object keys override the `services[_].name` fields.
-> For example:
-```yaml
-services:
-  s1:
-    url: https://s1/example/
-  s2:
-    url: https://s2/
-```
-Is equivalent to
-```yaml
-services:
-  - name: s1
-    url: https://s1/example/
-  - name: s2
-    url: https://s2/
-```
 
 #### GCP Metadata Token
 
@@ -683,6 +707,28 @@ func init() {
 	runtime.RegisterPlugin("my_custom_auth", &PluginFactory{})
 }
 
+```
+
+### Using private image from OCI repositories
+
+When using a private image from an OCI registry the credentials are mandatory as the OCI downloader needs the credentials for the pull operation.
+
+Examples of setting credetials for pulling private images: 
+*AWS ECR* private image usually requires at least basic authentication. The credentials to authenticate can be obtained using the AWS CLI command `aws ecr get-login` and those can be passed to the service configuration as basic bearer credentials as follows:
+```
+ credentials:
+      bearer:
+        scheme: "Basic"
+        token: "<username>:<password>"
+```
+The OCI downloader includes a base64 encoder for these credentials so they can be supplied as shown above. 
+
+For *GHCR* (Github Container Registry) you can use a developer PAT (personal access token) when downloading a private image. These can be supplied as:
+```
+ credentials:
+      bearer:
+        schema: "Bearer"
+        token: "<PAT>"
 ```
 
 ### Miscellaneous

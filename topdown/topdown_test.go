@@ -29,7 +29,7 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/types"
 	"github.com/open-policy-agent/opa/util"
 )
@@ -295,7 +295,7 @@ func TestTopDownQueryCancellationEvery(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() {
-				time.Sleep(time.Millisecond * 50)
+				time.Sleep(time.Millisecond * 500)
 				cancel.Cancel()
 				close(done)
 			}()
@@ -769,6 +769,10 @@ func (*contextPropagationStore) Commit(context.Context, storage.Transaction) err
 func (*contextPropagationStore) Abort(context.Context, storage.Transaction) {
 }
 
+func (*contextPropagationStore) Truncate(context.Context, storage.Transaction, storage.TransactionParams, storage.Iterator) error {
+	return nil
+}
+
 func (m *contextPropagationStore) Read(ctx context.Context, txn storage.Transaction, path storage.Path) (interface{}, error) {
 	val := ctx.Value(contextPropagationMock{})
 	m.calls = append(m.calls, val)
@@ -824,6 +828,10 @@ func (*astStore) Commit(context.Context, storage.Transaction) error {
 }
 
 func (*astStore) Abort(context.Context, storage.Transaction) {}
+
+func (*astStore) Truncate(context.Context, storage.Transaction, storage.TransactionParams, storage.Iterator) error {
+	return nil
+}
 
 func (a *astStore) Read(ctx context.Context, txn storage.Transaction, path storage.Path) (interface{}, error) {
 	if path.String() == a.path {

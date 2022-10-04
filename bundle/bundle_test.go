@@ -118,6 +118,51 @@ func TestReadWithSizeLimit(t *testing.T) {
 	}
 }
 
+func TestReadBundleInLazyMode(t *testing.T) {
+	files := [][2]string{
+		{"/a/b/c/data.json", "[1,2,3]"},
+		{"/a/b/d/data.json", "true"},
+		{"/a/b/y/data.yaml", `foo: 1`},
+		{"/example/example.rego", `package example`},
+		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}}`},
+		{"/.manifest", `{"revision": "foo", "roots": ["example"]}`}, // data is outside roots but validation skipped in lazy mode
+	}
+
+	buf := archive.MustWriteTarGz(files)
+	loader := NewTarballLoaderWithBaseURL(buf, "")
+	br := NewCustomReader(loader).WithLazyLoadingMode(true)
+
+	bundle, err := br.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(bundle.Data) != 0 {
+		t.Fatal("expected the bundle object to contain no data")
+	}
+
+	if len(bundle.Raw) == 0 {
+		t.Fatal("raw bundle bytes not set on bundle object")
+	}
+}
+
+func TestReadWithBundleEtag(t *testing.T) {
+
+	files := [][2]string{
+		{"/.manifest", `{"revision": "quickbrownfaux"}`},
+	}
+
+	buf := archive.MustWriteTarGz(files)
+	bundle, err := NewReader(buf).WithBundleEtag("foo").Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bundle.Etag != "foo" {
+		t.Fatalf("Expected bundle etag foo but got %v\n", bundle.Etag)
+	}
+}
+
 func testReadBundle(t *testing.T, baseDir string) {
 	module := `package example`
 
@@ -141,6 +186,7 @@ func testReadBundle(t *testing.T, baseDir string) {
 		{"/a/b/c/data.json", "[1,2,3]"},
 		{"/a/b/d/data.json", "true"},
 		{"/a/b/y/data.yaml", `foo: 1`},
+		{"/a/b/g/data.yml", "1"},
 		{"/example/example.rego", `package example`},
 		{"/policy.wasm", `legacy-wasm-module`},
 		{wasmResolverPath, `wasm-module`},
@@ -173,6 +219,7 @@ func testReadBundle(t *testing.T, baseDir string) {
 				"b": map[string]interface{}{
 					"c": []interface{}{json.Number("1"), json.Number("2"), json.Number("3")},
 					"d": true,
+					"g": json.Number("1"),
 					"y": map[string]interface{}{
 						"foo": json.Number("1"),
 					},
@@ -1321,8 +1368,8 @@ func TestHashBundleFiles(t *testing.T) {
 		plan     []byte
 		exp      int
 	}{
-		"no_content":                 {map[string]interface{}{}, Manifest{}, nil, nil, 2},
-		"data":                       {map[string]interface{}{"foo": "bar"}, Manifest{}, nil, nil, 2},
+		"no_content":                 {map[string]interface{}{}, Manifest{}, nil, nil, 1},
+		"data":                       {map[string]interface{}{"foo": "bar"}, Manifest{}, nil, nil, 1},
 		"data_and_manifest":          {map[string]interface{}{"foo": "bar"}, Manifest{Revision: "quickbrownfaux"}, []byte{}, nil, 2},
 		"data_and_manifest_and_wasm": {map[string]interface{}{"foo": "bar"}, Manifest{Revision: "quickbrownfaux"}, []byte("modules-compiled-as-wasm-binary"), nil, 3},
 		"data_and_plan":              {map[string]interface{}{"foo": "bar"}, Manifest{Revision: "quickbrownfaux"}, nil, []byte("not a plan but good enough"), 3},

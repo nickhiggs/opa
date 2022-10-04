@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1001,6 +1002,7 @@ func TestCompileV1Observability(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer disk.Close(ctx)
 		f := newFixtureWithStore(t, disk)
 
 		err = f.v1(http.MethodPut, "/policies/test", `package test
@@ -1579,6 +1581,7 @@ p = true { false }`
 				if err != nil {
 					t.Fatal(err)
 				}
+				defer disk.Close(ctx)
 				executeRequests(t, tc.reqs,
 					variant{"inmem", nil},
 					variant{"disk", []func(*Server){
@@ -1600,6 +1603,7 @@ func TestDataV1Metrics(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer disk.Close(ctx)
 
 		f := newFixtureWithStore(t, disk)
 		put := newReqV1(http.MethodPut, `/data?metrics`, `{"foo":"bar"}`)
@@ -1765,6 +1769,7 @@ func TestBundleScope(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer disk.Close(ctx)
 
 		for _, v := range []variant{
 			{"inmem", nil},
@@ -1837,6 +1842,13 @@ func TestBundleScope(t *testing.T) {
 						body:   `package a.b`,
 						code:   http.StatusBadRequest,
 						resp:   `{"code": "invalid_parameter", "message": "path a/b is owned by bundle \"test-bundle\""}`,
+					},
+					{
+						method: "PUT",
+						path:   "/policies/someid",
+						body:   `package other.path`,
+						code:   http.StatusBadRequest,
+						resp:   `{"code": "invalid_parameter", "message": "path x/y/z is owned by bundle \"test-bundle\""}`,
 					},
 					{
 						method: "DELETE",
@@ -2406,6 +2418,7 @@ func TestDataMetricsEval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer disk.Close(ctx)
 
 		f := newFixtureWithStore(t, disk)
 
@@ -3266,6 +3279,7 @@ func TestQueryV1(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer disk.Close(ctx)
 
 		f := newFixtureWithStore(t, disk)
 		get := newReqV1(http.MethodGet, `/query?q=a=[1,2,3]%3Ba[i]=x&metrics`, "")
@@ -3539,6 +3553,73 @@ func TestAuthorization(t *testing.T) {
 	}
 }
 
+func TestAuthorizationUsesInterQueryCache(t *testing.T) {
+
+	ctx := context.Background()
+	store := inmem.New()
+	m, err := plugins.New([]byte{}, "test", store)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		panic(err)
+	}
+
+	txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
+
+	var c uint64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddUint64(&c, 1)
+		fmt.Fprintf(w, `{"count": %d}`, c)
+	}))
+
+	authzPolicy := fmt.Sprintf(`package system.authz
+
+default allow := false
+
+allow {
+	resp := http.send({
+		"method": "GET", "url": "%[1]s/foo",
+		"force_cache": true,
+		"force_json_decode": true,
+		"force_cache_duration_seconds": 60,
+	})
+
+	resp.body.count == 1
+}
+`, ts.URL)
+	t.Log(authzPolicy)
+
+	if err := store.UpsertPolicy(ctx, txn, "test", []byte(authzPolicy)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Commit(ctx, txn); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := New().
+		WithAddresses([]string{":8182"}).
+		WithStore(store).
+		WithManager(m).
+		WithAuthorization(AuthorizationBasic).
+		Init(ctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 5; i++ {
+		req1, err := http.NewRequest(http.MethodGet, "http://localhost:8182/health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		validateAuthorizedRequest(t, server, req1, http.StatusOK)
+	}
+}
+
 func validateAuthorizedRequest(t *testing.T, s *Server, req *http.Request, exp int) {
 	t.Helper()
 
@@ -3547,7 +3628,7 @@ func validateAuthorizedRequest(t *testing.T, s *Server, req *http.Request, exp i
 	// First check the main router
 	s.Handler.ServeHTTP(r, req)
 	if r.Code != exp {
-		t.Fatalf("(Default Handler) Expected %v but got: %v", exp, r)
+		t.Errorf("(Default Handler) Expected %v but got: %v", exp, r)
 	}
 
 	r = httptest.NewRecorder()
@@ -3555,7 +3636,7 @@ func validateAuthorizedRequest(t *testing.T, s *Server, req *http.Request, exp i
 	// Ensure that auth happens for the diagnostic handler as well
 	s.DiagnosticHandler.ServeHTTP(r, req)
 	if r.Code != exp {
-		t.Fatalf("(Diagnostic Handler) Expected %v but got: %v", exp, r)
+		t.Errorf("(Diagnostic Handler) Expected %v but got: %v", exp, r)
 	}
 }
 
@@ -3691,6 +3772,10 @@ func (queryBindingErrStore) Commit(ctx context.Context, txn storage.Transaction)
 
 func (queryBindingErrStore) Abort(ctx context.Context, txn storage.Transaction) {
 
+}
+
+func (queryBindingErrStore) Truncate(context.Context, storage.Transaction, storage.TransactionParams, storage.Iterator) error {
+	return nil
 }
 
 func (queryBindingErrStore) Register(context.Context, storage.Transaction, storage.TriggerConfig) (storage.TriggerHandle, error) {

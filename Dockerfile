@@ -7,6 +7,7 @@ ARG BASE
 FROM ${BASE}
 
 LABEL org.opencontainers.image.authors="Torin Sandall <torinsandall@gmail.com>"
+LABEL org.opencontainers.image.source="https://github.com/open-policy-agent/opa"
 
 # Temporarily allow us to identify whether running from within an offical
 # Docker image, so that we may print a warning when uid or gid == 0 (root)
@@ -27,6 +28,7 @@ ARG TARGETARCH
 ARG BIN_DIR=.
 ARG BIN_SUFFIX=
 COPY ${BIN_DIR}/opa_${TARGETOS}_${TARGETARCH}${BIN_SUFFIX} /opa
+ENV PATH=${PATH}:/
 
 ENTRYPOINT ["/opa"]
 CMD ["run"]

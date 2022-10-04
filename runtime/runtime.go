@@ -15,7 +15,6 @@ import (
 	mr "math/rand"
 	"os"
 	"os/signal"
-	"os/user"
 	"strings"
 	"sync"
 	"syscall"
@@ -214,8 +213,9 @@ type Params struct {
 
 // LoggingConfig stores the configuration for OPA's logging behaviour.
 type LoggingConfig struct {
-	Level  string
-	Format string
+	Level           string
+	Format          string
+	TimestampFormat string
 }
 
 // NewParams returns a new Params object.
@@ -268,7 +268,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	// that the logging configuration is applied. Once we remove all usage of
 	// the global logger and we remove the API that allows callers to access the
 	// global logger, we can remove this.
-	logging.Get().SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+	logging.Get().SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 	logging.Get().SetLevel(level)
 
 	var logger logging.Logger
@@ -278,7 +278,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	} else {
 		stdLogger := logging.New()
 		stdLogger.SetLevel(level)
-		stdLogger.SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+		stdLogger.SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 		logger = stdLogger
 	}
 
@@ -309,7 +309,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	consoleLogger := params.ConsoleLogger
 	if consoleLogger == nil {
 		l := logging.New()
-		l.SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+		l.SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 		consoleLogger = l
 	}
 
@@ -333,7 +333,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 			return nil, fmt.Errorf("initialize disk store: %w", err)
 		}
 	} else {
-		store = inmem.New()
+		store = inmem.NewWithOpts(inmem.OptRoundTripOnWrite(false))
 	}
 
 	manager, err := plugins.New(config,
@@ -418,16 +418,7 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 		rt.logger.Error("Token authentication enabled without authorization. Authentication will be ineffective. See https://www.openpolicyagent.org/docs/latest/security/#authentication-and-authorization for more information.")
 	}
 
-	usr, err := user.Current()
-	if err != nil {
-		rt.logger.Debug("Failed to determine uid/gid of process owner")
-	} else if usr.Uid == "0" || usr.Gid == "0" {
-		message := "OPA running with uid or gid 0. Running OPA with root privileges is not recommended."
-		if os.Getenv("OPA_DOCKER_IMAGE") == "official" {
-			message += " Use the -rootless image to avoid running with root privileges. This will be made the default in later OPA releases."
-		}
-		rt.logger.Warn(message)
-	}
+	checkUserPrivileges(rt.logger)
 
 	// NOTE(tsandall): at some point, hopefully we can remove this because the
 	// Go runtime will just do the right thing. Until then, try to set

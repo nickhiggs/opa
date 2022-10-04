@@ -27,9 +27,9 @@ ifeq ($(WASM_ENABLED),1)
 GO_TAGS = -tags=opa_wasm
 endif
 
-GOLANGCI_LINT_VERSION := v1.43.0
+GOLANGCI_LINT_VERSION := v1.46.2
 
-DOCKER_RUNNING := $(shell docker ps >/dev/null 2>&1 && echo 1 || echo 0)
+DOCKER_RUNNING ?= $(shell docker ps >/dev/null 2>&1 && echo 1 || echo 0)
 
 # We use root because the windows build, invoked through the ci-go-build-windows
 # target, installs the gcc mingw32 cross-compiler.
@@ -60,8 +60,6 @@ S3_RELEASE_BUCKET ?= opa-releases
 FUZZ_TIME ?= 1h
 TELEMETRY_URL ?= #Default empty
 
-BUILD_COMMIT := $(shell ./build/get-build-commit.sh)
-BUILD_TIMESTAMP := $(shell ./build/get-build-timestamp.sh)
 BUILD_HOSTNAME := $(shell ./build/get-build-hostname.sh)
 
 RELEASE_BUILD_IMAGE := golang:$(GOVERSION)
@@ -73,9 +71,6 @@ TELEMETRY_FLAG := -X github.com/open-policy-agent/opa/internal/report.ExternalSe
 endif
 
 LDFLAGS := "$(TELEMETRY_FLAG) \
-	-X github.com/open-policy-agent/opa/version.Version=$(VERSION) \
-	-X github.com/open-policy-agent/opa/version.Vcs=$(BUILD_COMMIT) \
-	-X github.com/open-policy-agent/opa/version.Timestamp=$(BUILD_TIMESTAMP) \
 	-X github.com/open-policy-agent/opa/version.Hostname=$(BUILD_HOSTNAME)"
 
 
@@ -167,7 +162,6 @@ clean: wasm-lib-clean
 .PHONY: fuzz
 fuzz:
 	go test ./ast -fuzz FuzzParseStatementsAndCompileModules -fuzztime ${FUZZ_TIME} -v -run '^$$'
-
 
 ######################################################
 #
@@ -417,11 +411,12 @@ endif
 .PHONY: ci-binary-smoke-test-%
 ci-binary-smoke-test-%:
 	chmod +x "$(RELEASE_DIR)/$(BINARY)"
+	"$(RELEASE_DIR)/$(BINARY)" version
 	"$(RELEASE_DIR)/$(BINARY)" eval -t "$*" 'time.now_ns()'
 
 .PHONY: push-binary-edge
 push-binary-edge:
-	aws s3 sync $(RELEASE_DIR) s3://$(S3_RELEASE_BUCKET)/edge/ --no-progress
+	aws s3 sync $(RELEASE_DIR) s3://$(S3_RELEASE_BUCKET)/edge/ --no-progress --region us-west-1
 
 .PHONY: docker-login
 docker-login:
@@ -487,14 +482,14 @@ endif
 		-e GITHUB_TOKEN=$(GITHUB_TOKEN) \
 		-e LAST_VERSION=$(LAST_VERSION) \
 		-v $(PWD):/_src \
-		python:2.7 \
+		cmd.cat/make/git/go/python3/perl \
 		/_src/build/gen-release-patch.sh --version=$(VERSION) --source-url=/_src
 
 .PHONY: dev-patch
 dev-patch:
 	@$(DOCKER) run $(DOCKER_FLAGS) \
 		-v $(PWD):/_src \
-		python:2.7 \
+		cmd.cat/make/git/go/python3/perl \
 		/_src/build/gen-dev-patch.sh --version=$(VERSION) --source-url=/_src
 
 # Deprecated targets. To be removed.

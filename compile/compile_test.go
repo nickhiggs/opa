@@ -3,6 +3,7 @@ package compile
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/format"
 	"github.com/open-policy-agent/opa/internal/ref"
+	"github.com/open-policy-agent/opa/ir"
 	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/util/test"
@@ -52,6 +54,11 @@ func TestCompilerInitErrors(t *testing.T) {
 			note: "wasm compilation requires at least one entrypoint",
 			c:    New().WithTarget("wasm"),
 			want: errors.New("wasm compilation requires at least one entrypoint"),
+		},
+		{
+			note: "plan compilation requires at least one entrypoint",
+			c:    New().WithTarget("plan"),
+			want: errors.New("plan compilation requires at least one entrypoint"),
 		},
 	}
 
@@ -211,6 +218,64 @@ func TestCompilerLoadFilesystem(t *testing.T) {
 
 		if !compiler.bundle.Equal(*exp) {
 			t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", exp, compiler.bundle)
+		}
+	})
+}
+
+func TestCompilerLoadFilesystemWithEnablePrintStatementsFalse(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+
+                        allow { print(1) }
+		`,
+		"data.json": `
+			{"b1": {"k": "v"}}`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").WithEntrypoints("test/allow").
+			WithEnablePrintStatements(false)
+
+		if err := compiler.Build(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		bundle := compiler.Bundle()
+
+		if strings.Contains(string(bundle.PlanModules[0].Raw), "internal.print") {
+			t.Fatalf("output different than expected:\n\ngot: %v\n\nfound: internal.print", string(bundle.PlanModules[0].Raw))
+		}
+	})
+}
+
+func TestCompilerLoadFilesystemWithEnablePrintStatementsTrue(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+
+                        allow { print(1) }
+		`,
+		"data.json": `
+			{"b1": {"k": "v"}}`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").WithEntrypoints("test/allow").
+			WithEnablePrintStatements(true)
+
+		if err := compiler.Build(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		bundle := compiler.Bundle()
+
+		if !strings.Contains(string(bundle.PlanModules[0].Raw), "internal.print") {
+			t.Fatalf("output different than expected:\n\ngot: %v\n\nmissing: internal.print", string(bundle.PlanModules[0].Raw))
 		}
 	})
 }
@@ -678,6 +743,80 @@ func TestCompilerPlanTarget(t *testing.T) {
 
 		if len(compiler.bundle.PlanModules) == 0 {
 			t.Fatal("expected to find compiled plan module")
+		}
+	})
+}
+
+func TestCompilerPlanTargetPruneUnused(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `package test
+		p[1]
+		f(x) { p[x] }`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").
+			WithEntrypoints("test").
+			WithPruneUnused(true)
+		err := compiler.Build(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(compiler.bundle.PlanModules) == 0 {
+			t.Fatal("expected to find compiled plan module")
+		}
+
+		plan := compiler.bundle.PlanModules[0].Raw
+		var policy ir.Policy
+
+		if err := json.Unmarshal(plan, &policy); err != nil {
+			t.Fatal(err)
+		}
+		if exp, act := 1, len(policy.Funcs.Funcs); act != exp {
+			t.Fatalf("expected %d funcs, got %d", exp, act)
+		}
+		f := policy.Funcs.Funcs[0]
+		if exp, act := "g0.data.test.p", f.Name; act != exp {
+			t.Fatalf("expected func named %v, got %v", exp, act)
+		}
+	})
+}
+
+func TestCompilerPlanTargetUnmatchedEntrypoints(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `package test
+
+		p := 7
+		q := p + 1`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().WithPaths(root).WithTarget("plan").WithEntrypoints("test/p", "test/q", "test/no")
+		err := compiler.Build(context.Background())
+		if err == nil {
+			t.Error("expected error from unmatched entrypoint")
+		}
+		expectError := "entrypoint \"test/no\" does not refer to a rule or policy decision"
+		if err.Error() != expectError {
+			t.Errorf("expected error %s, got: %s", expectError, err.Error())
+		}
+	})
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().WithPaths(root).WithTarget("plan").WithEntrypoints("foo", "foo.bar", "test/no")
+		err := compiler.Build(context.Background())
+		if err == nil {
+			t.Error("expected error from unmatched entrypoints")
+		}
+		expectError := "entrypoint \"foo\" does not refer to a rule or policy decision"
+		if err.Error() != expectError {
+			t.Errorf("expected error %s, got: %s", expectError, err.Error())
 		}
 	})
 }
@@ -1386,14 +1525,14 @@ func getOptimizer(modules map[string]string, data string, entries []string, root
 
 func getModuleFiles(src map[string]string, includeRaw bool) []bundle.ModuleFile {
 
-	var keys []string
+	keys := make([]string, 0, len(src))
 
 	for k := range src {
 		keys = append(keys, k)
 	}
 
 	sort.Strings(keys)
-	var modules []bundle.ModuleFile
+	modules := make([]bundle.ModuleFile, 0, len(keys))
 
 	for _, k := range keys {
 		module, err := ast.ParseModule(k, src[k])

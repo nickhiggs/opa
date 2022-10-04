@@ -39,7 +39,7 @@ func File(path string, includeAnnotations bool) (*Info, error) {
 	bi := &Info{Manifest: b.Manifest}
 
 	namespaces := make(map[string][]string, len(b.Modules))
-	var modules []*ast.Module
+	modules := make([]*ast.Module, 0, len(b.Modules))
 	for _, m := range b.Modules {
 		namespaces[m.Parsed.Package.Path.String()] = append(namespaces[m.Parsed.Package.Path.String()], filepath.Clean(m.Path))
 		modules = append(modules, m.Parsed)
@@ -47,10 +47,9 @@ func File(path string, includeAnnotations bool) (*Info, error) {
 	bi.Namespaces = namespaces
 
 	if includeAnnotations {
-		var errs ast.Errors
-		as, err := ast.BuildAnnotationSet(modules)
+		as, errs := ast.BuildAnnotationSet(modules)
 		if len(errs) > 0 {
-			return nil, err
+			return nil, errs
 		}
 		bi.Annotations = as.Flatten()
 	}

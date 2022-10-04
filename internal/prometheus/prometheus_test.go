@@ -2,10 +2,10 @@
 // Use of this source code is governed by an Apache2
 // license that can be found in the LICENSE file.
 
-// NOTE(sr): Different go runtime metrics on 1.16.
-// This can be removed when we drop support for go 1.16.
-//go:build !go1.16
-// +build !go1.16
+// NOTE(sr): Different go runtime metrics on 1.19.
+// This can be removed when we drop support for go 1.19.
+//go:build go1.19
+// +build go1.19
 
 package prometheus
 
@@ -44,6 +44,8 @@ func TestJSONSerialization(t *testing.T) {
 		"GAUGE": {
 			"go_gc_heap_goal_bytes",
 			"go_gc_heap_objects_objects",
+			"go_gc_stack_starting_size_bytes",
+			"go_gc_limiter_last_enabled_gc_cycle",
 			"go_goroutines",
 			"go_info",
 			"go_memory_classes_heap_free_bytes",
@@ -62,7 +64,7 @@ func TestJSONSerialization(t *testing.T) {
 			"go_memory_classes_total_bytes",
 			"go_memstats_alloc_bytes",
 			"go_memstats_buck_hash_sys_bytes",
-			"go_memstats_gc_cpu_fraction",
+			// "go_memstats_gc_cpu_fraction", // removed: https://github.com/prometheus/client_golang/issues/842#issuecomment-861812034
 			"go_memstats_gc_sys_bytes",
 			"go_memstats_heap_alloc_bytes",
 			"go_memstats_heap_idle_bytes",
@@ -81,6 +83,7 @@ func TestJSONSerialization(t *testing.T) {
 			"go_memstats_stack_sys_bytes",
 			"go_memstats_sys_bytes",
 			"go_sched_goroutines_goroutines",
+			"go_sched_gomaxprocs_threads",
 			"go_threads",
 		},
 		"COUNTER": {
@@ -92,6 +95,7 @@ func TestJSONSerialization(t *testing.T) {
 			"go_gc_heap_tiny_allocs_objects_total",
 			"go_gc_heap_frees_bytes_total",
 			"go_gc_heap_frees_objects_total",
+			"go_cgo_go_to_c_calls_calls_total",
 			"go_memstats_alloc_bytes_total",
 			"go_memstats_lookups_total",
 			"go_memstats_mallocs_total",
@@ -101,9 +105,9 @@ func TestJSONSerialization(t *testing.T) {
 			"go_gc_duration_seconds",
 		},
 		"HISTOGRAM": {
-			"go_gc_pauses_seconds_total",
-			"go_gc_heap_allocs_by_size_bytes_total",
-			"go_gc_heap_frees_by_size_bytes_total",
+			"go_gc_pauses_seconds",            // was: "go_gc_pauses_seconds_total"
+			"go_gc_heap_allocs_by_size_bytes", // was: "go_gc_heap_allocs_by_size_bytes_total"
+			"go_gc_heap_frees_by_size_bytes",  // was: "go_gc_heap_frees_by_size_bytes_total"
 			"go_sched_latencies_seconds",
 		},
 	}
@@ -124,5 +128,18 @@ func TestJSONSerialization(t *testing.T) {
 	}
 	if len(act) != found {
 		t.Errorf("unexpected extra metrics, expected %d, got %d", found, len(act))
+		for a, ty := range act {
+			found := false
+			for _, es := range exp {
+				for _, e := range es {
+					if a == e {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Errorf("unexpected metric: %v (type: %v)", a, ty)
+			}
+		}
 	}
 }

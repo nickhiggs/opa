@@ -22,7 +22,7 @@ type Instance struct {
 // This will also run the `start` function of the instance, returning an error
 // if it traps.
 func NewInstance(store Storelike, module *Module, imports []AsExtern) (*Instance, error) {
-	importsRaw := make([]C.wasmtime_extern_t, len(imports), len(imports))
+	importsRaw := make([]C.wasmtime_extern_t, len(imports))
 	for i, imp := range imports {
 		importsRaw[i] = imp.AsExtern()
 	}
@@ -53,13 +53,6 @@ func NewInstance(store Storelike, module *Module, imports []AsExtern) (*Instance
 
 func mkInstance(val C.wasmtime_instance_t) *Instance {
 	return &Instance{val}
-}
-
-// Type returns an `InstanceType` that corresponds for this instance.
-func (i *Instance) Type(store Storelike) *InstanceType {
-	ptr := C.wasmtime_instance_type(store.Context(), &i.val)
-	runtime.KeepAlive(store)
-	return mkInstanceType(ptr, nil)
 }
 
 type externList struct {
@@ -123,10 +116,4 @@ func (i *Instance) GetFunc(store Storelike, name string) *Func {
 		return nil
 	}
 	return f.Func()
-}
-
-func (i *Instance) AsExtern() C.wasmtime_extern_t {
-	ret := C.wasmtime_extern_t{kind: C.WASMTIME_EXTERN_INSTANCE}
-	C.go_wasmtime_extern_instance_set(&ret, i.val)
-	return ret
 }

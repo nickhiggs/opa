@@ -144,6 +144,7 @@ type (
 		Annotations []*Annotations `json:"annotations,omitempty"`
 		Rules       []*Rule        `json:"rules,omitempty"`
 		Comments    []*Comment     `json:"comments,omitempty"`
+		stmts       []Statement
 	}
 
 	// Comment contains the raw text from the comment in the definition.
@@ -260,32 +261,22 @@ func (mod *Module) Copy() *Module {
 	cpy := *mod
 	cpy.Rules = make([]*Rule, len(mod.Rules))
 
-	var nodes map[Node]Node
-
-	if len(mod.Annotations) > 0 {
-		nodes = make(map[Node]Node)
-	}
+	nodes := make(map[Node]Node, len(mod.Rules)+len(mod.Imports)+1 /* package */)
 
 	for i := range mod.Rules {
 		cpy.Rules[i] = mod.Rules[i].Copy()
 		cpy.Rules[i].Module = &cpy
-		if nodes != nil {
-			nodes[mod.Rules[i]] = cpy.Rules[i]
-		}
+		nodes[mod.Rules[i]] = cpy.Rules[i]
 	}
 
 	cpy.Imports = make([]*Import, len(mod.Imports))
 	for i := range mod.Imports {
 		cpy.Imports[i] = mod.Imports[i].Copy()
-		if nodes != nil {
-			nodes[mod.Imports[i]] = cpy.Imports[i]
-		}
+		nodes[mod.Imports[i]] = cpy.Imports[i]
 	}
 
 	cpy.Package = mod.Package.Copy()
-	if nodes != nil {
-		nodes[mod.Package] = cpy.Package
-	}
+	nodes[mod.Package] = cpy.Package
 
 	cpy.Annotations = make([]*Annotations, len(mod.Annotations))
 	for i := range mod.Annotations {
@@ -295,6 +286,11 @@ func (mod *Module) Copy() *Module {
 	cpy.Comments = make([]*Comment, len(mod.Comments))
 	for i := range mod.Comments {
 		cpy.Comments[i] = mod.Comments[i].Copy()
+	}
+
+	cpy.stmts = make([]Statement, len(mod.stmts))
+	for i := range mod.stmts {
+		cpy.stmts[i] = nodes[mod.stmts[i]]
 	}
 
 	return &cpy
@@ -791,7 +787,7 @@ func (a Args) Copy() Args {
 }
 
 func (a Args) String() string {
-	var buf []string
+	buf := make([]string, 0, len(a))
 	for _, t := range a {
 		buf = append(buf, t.String())
 	}
@@ -935,7 +931,7 @@ func (body Body) SetLoc(loc *Location) {
 }
 
 func (body Body) String() string {
-	var buf []string
+	buf := make([]string, 0, len(body))
 	for _, v := range body {
 		buf = append(buf, v.String())
 	}
@@ -952,6 +948,11 @@ func (body Body) Vars(params VarVisitorParams) VarSet {
 
 // NewExpr returns a new Expr object.
 func NewExpr(terms interface{}) *Expr {
+	switch terms.(type) {
+	case *SomeDecl, *Every, *Term, []*Term: // ok
+	default:
+		panic("unreachable")
+	}
 	return &Expr{
 		Negated: false,
 		Terms:   terms,
@@ -1237,7 +1238,7 @@ func (expr *Expr) SetLoc(loc *Location) {
 }
 
 func (expr *Expr) String() string {
-	var buf []string
+	buf := make([]string, 0, 2+len(expr.With))
 	if expr.Negated {
 		buf = append(buf, "not")
 	}

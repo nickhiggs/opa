@@ -274,7 +274,7 @@ p {
 
 import future.keywords
 
-p {
+p if {
 	every k, v in [1, 2] { k != v }
 }`,
 		},
@@ -290,7 +290,7 @@ p {
 
 import future.keywords
 
-p {
+p if {
 	every k, v in [1, 2] { k != v }
 }`,
 		},
@@ -455,6 +455,17 @@ a[_x[y][[z, w]]]`,
 			actual := strings.TrimSpace(string(bs))
 			if actual != expected {
 				t.Fatalf("Expected:\n\n%q\n\nGot:\n\n%q\n\n", expected, actual)
+			}
+		})
+
+		// consistency check: disregarding source locations, it shouldn't panic
+		t.Run("no_loc/"+tc.note, func(t *testing.T) {
+			_, err := AstWithOpts(tc.toFmt, Opts{IgnoreLocations: true})
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
+			}
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
 			}
 		})
 	}

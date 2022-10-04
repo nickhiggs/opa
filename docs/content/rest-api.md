@@ -2002,9 +2002,10 @@ response. To enable performance metric collection on an API call, specify the
 `metrics=true` query parameter when executing the API call. Performance metrics
 are currently supported for the following APIs:
 
-- Data API (GET and POST)
-- Policy API (all methods)
+- Policy API (PUT and DELETE)
+- Data API (GET, POST, PUT, and DELETE)
 - Query API (all methods)
+- Compile API (POST)
 
 For example:
 
@@ -2044,6 +2045,12 @@ OPA currently supports the following query performance metrics:
 - **timer_rego_module_parse_ns**: time taken (in nanoseconds) to parse the input policy module.
 - **timer_rego_module_compile_ns**: time taken (in nanoseconds) to compile the loaded policy modules.
 - **timer_server_handler_ns**: time take (in nanoseconds) to handle the API request.
+- **counter_server_query_cache_hit**: number of cache hits for the query.
+
+The `counter_server_query_cache_hit` counter gives an indication about whether OPA creates a new Rego query
+or it uses a pre-processed query which holds some prepared state to serve the API request. A pre-processed query will be
+faster to evaluate since OPA will not have to re-parse or compile it. Hence, when the query is served from the cache
+`timer_rego_query_parse_ns` and `timer_rego_query_compile_ns` timers will be omitted from the reported performance metrics.
 
 OPA also supports query instrumentation. To enable query instrumentation,
 specify the `instrument=true` query parameter when executing the API call.

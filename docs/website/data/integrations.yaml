@@ -19,6 +19,7 @@ integrations:
       - https://docs.styra.com/tutorials/ssh/introduction
       - https://docs.styra.com/tutorials/terraform/introduction
       - https://docs.styra.com/tutorials/entitlements/introduction
+      - https://academy.styra.com/courses/opa-rego
     code:
       - https://github.com/StyraInc/das-opa-samples
       - https://github.com/StyraInc/example-policy-management
@@ -29,6 +30,78 @@ integrations:
       - https://blog.styra.com/blog/six-of-my-favorite-styra-declarative-authorization-service-das-features
       - https://blog.styra.com/blog/styra-declarative-authorization-service-expands-service-mesh-use-case
       - https://blog.styra.com/blog/opa-styra-terraform-protect-your-cloud-investment
+      - https://www.styra.com/blog/how-to-write-your-first-rules-in-rego-the-policy-language-for-opa
+    videos:
+      - title: "Securing Microservices-Based Apps with Dynamic Traffic Authz"
+        speakers:
+          - name: Kurt Roekle
+            organization: styra
+        venue: online
+        link: https://www.youtube.com/watch?v=9F-Zyn9j25g
+      - title: "Policy Management Across the Cloud-Native Stack: Styra DAS for Terraform"
+        speakers:
+          - name: Kurt Roekle
+            organization: styra
+        venue: online
+        link: https://www.youtube.com/watch?v=3K0RqIvNfAc
+
+  aws-cloudformation-hook:
+    title: AWS CloudFormation Hook
+    description: AWS CloudFormation Hook that uses OPA to make policy decisions on infrastructure provisioned via AWS CloudFormation
+    software:
+      - aws
+      - cloudformation
+    labels:
+      type: poweredbyopa
+    tutorials:
+      - https://www.openpolicyagent.org/docs/latest/aws-cloudformation-hooks/
+    code:
+      - https://github.com/StyraInc/opa-aws-cloudformation-hook
+    blogs:
+      - https://blog.styra.com/blog/the-opa-aws-cloudformation-hook
+    inventors:
+      - styra
+
+  oauth2:
+    title: OAuth2
+    description: Integrating OAuth2 with Open Policy Agent
+    software:
+      - oauth
+    labels:
+      category: security
+    tutorials:
+      - https://www.openpolicyagent.org/docs/latest/oauth-oidc/
+    blogs:
+      - https://blog.styra.com/blog/integrating-identity-oauth2-and-openid-connect-in-open-policy-agent
+
+  oidc:
+    title: OpenID Connect (OIDC)
+    description: Integrating OpenID Connect (OIDC) with Open Policy Agent
+    software:
+      - oauth
+      - oidc
+    labels:
+      category: security
+    tutorials:
+      - https://www.openpolicyagent.org/docs/latest/oauth-oidc/
+    blogs:
+      - https://blog.styra.com/blog/integrating-identity-oauth2-and-openid-connect-in-open-policy-agent
+
+  google-kubernetes-engine:
+    title: Google Kubernetes Engine (GKE)
+    description: OPA related tools and policy libraries for Kubernetes in the Google Cloud Platform
+    software:
+      - kubernetes
+      - google-kubernetes-engine
+    labels:
+      category: containers
+      layer: orchestration
+    code:
+      - https://github.com/google/gke-policy-automation
+    tutorials:
+      - https://github.com/google/gke-policy-automation/tree/main/gke-policies
+    inventors:
+      - google
 
   apache-apisix:
     title: Authorization Integration with Apache APISIX
@@ -72,6 +145,21 @@ integrations:
       - https://github.com/withfig/autocomplete/blob/master/src/opa.ts
     inventors:
       - fig
+
+  fiber:
+    title: fiber
+    description: |
+      Fiber is an Express inspired web framework built on top of Fasthttp, the fastest HTTP engine for Go.
+      Designed to ease things up for fast development with zero memory allocation and performance in mind.
+      With Open Policy Agent integration, you can run your Rego policies as part of the request lifecycle in the middleware.
+    labels:
+      category: application
+      layer: library
+    software:
+      - golang
+      - fiber
+    code:
+      - https://github.com/gofiber/contrib/tree/main/opafiber
 
   sphinx-rego:
     title: Automatically document Rego policies
@@ -287,6 +375,17 @@ integrations:
     inventors:
       - build.security
 
+  nginx:
+    title: Nginx
+    description: OPA Authorization for Nginx
+    labels:
+      category: gateway
+      layer: network
+    software:
+      - nginx
+    code:
+      - https://github.com/summerwind/opa-nginx-rbac
+
   asp-dotnet-core:
     title: ASP.NET Core
     description: |
@@ -462,11 +561,14 @@ integrations:
     labels:
       category: streaming
       layer: data
+    blogs:
+      - https://opencredo.com/blogs/controlling-kafka-data-flows-using-open-policy-agent/
     tutorials:
       - https://www.openpolicyagent.org/docs/latest/kafka-authorization/
     code:
-      - https://github.com/anderseknert/opa-kafka-plugin
+      - https://github.com/StyraInc/opa-kafka-plugin
       - https://github.com/llofberg/kafka-authorizer-opa
+      - https://github.com/opencredo/opa-single-message-transformer
     inventors:
       - ticketmaster
       - styra
@@ -495,7 +597,7 @@ integrations:
     code:
       - https://github.com/strimzi/strimzi-kafka-operator
       - https://github.com/scholzj/demo-opa-kafka-authorization
-      - https://github.com/anderseknert/opa-kafka-plugin
+      - https://github.com/StyraInc/opa-kafka-plugin
     inventors:
       - redhat
 
@@ -551,7 +653,7 @@ integrations:
       layer: data
       category: authorization
     tutorials:
-      - https://github.com/minio/minio/blob/master/docs/sts/opa.md
+      - https://github.com/minio/minio/blob/master/docs/iam/opa.md
     inventors:
       - minio
       - styra
@@ -575,10 +677,11 @@ integrations:
       - https://github.com/fugue/regula
       - https://github.com/accurics/terrascan
       - https://github.com/Checkmarx/kics
-    policies:
       - https://github.com/open-policy-agent/library/tree/master/terraform
       - https://github.com/accurics/terrascan/tree/master/pkg/policies/opa/rego
       - https://github.com/Checkmarx/kics/tree/master/assets/queries/terraform
+    blogs:
+      - https://blog.styra.com/blog/policy-based-infrastructure-guardrails-with-terraform-and-opa
     inventors:
       - fugue
       - accurics
@@ -587,6 +690,31 @@ integrations:
       - styra
       - docker
       - snyk
+
+  pulumi:
+    title: Pulumi
+    description: Build infrastructure as code in familiar languages. CrossGuard is Pulumi's policy as code offering, providing OPA as one of the options to use for defining policy.
+    software:
+      - pulumi
+      - aws
+      - gcp
+      - azure
+    labels:
+      category: publiccloud
+      layer: orchestration
+    code:
+      - https://github.com/pulumi/pulumi-policy-opa
+    blogs:
+      - https://www.pulumi.com/blog/opa-support-for-crossguard/
+    videos:
+      - title: "Testing Configuration with Open Policy Agent"
+        speakers:
+          - name: Gareth Rushgrove
+            organization: snyk
+        venue: Cloud Engineering Summit 2020
+        link: https://www.pulumi.com/resources/testing-configuration-with-open-policy-agent/
+    inventors:
+      - pulumi
 
   iptables:
     title: IPTables
@@ -634,10 +762,12 @@ integrations:
       - https://github.com/Bisnode/opa-spring-security
       - https://github.com/build-security/opa-java-spring-client
       - https://github.com/massenz/jwt-opa
+      - https://github.com/eugenp/tutorials/tree/master/spring-security-modules/spring-security-opa
 
     tutorials:
       - https://github.com/open-policy-agent/contrib/blob/master/spring_authz/README.md
       - https://github.com/massenz/jwt-opa#web-server-demo-app
+      - https://www.baeldung.com/spring-security-authorization-opa
     inventors:
       - styra
       - build.security
@@ -1012,6 +1142,27 @@ integrations:
     blogs:
       - https://github.com/EliuX/flask-opa/tree/master/examples
 
+  permit:
+    title: Permit.io
+    description:  |
+      Permit.io empowers developers to bake in permissions and access-control into any product in minutes and takes away the pain of constantly rebuilding them.
+      Permit is based on OPA.
+    labels:
+      category: authorization
+      layer: application
+    inventors:
+      - permitio
+    code:
+      - https://github.com/permitio
+    tutorials:
+      - https://docs.permit.io/
+    videos:
+      - https://docs.permit.io/tutorials/onboarding_demo
+    blogs:
+      - https://www.permit.io/blog/introduction-to-opa
+      - https://www.permit.io/blog/implement-abac-using-opa
+      - https://www.permit.io/blog/implement-rbac-using-opa
+
   opal:
     title: OPAL (Open Policy Administration Layer)
     description:  |
@@ -1111,6 +1262,7 @@ integrations:
       - graphene-graphql
     code:
       - https://github.com/dolevf/graphql-open-policy-agent
+
   rekor:
     title: Rekor transparency log monitoring and alerting
     description: |
@@ -1121,14 +1273,49 @@ integrations:
       layer: application
     software:
       - rekor
+    inventors:
+      - sigstore
     code:
       - https://github.com/nsmith5/rekor-sidekick
+    videos:
+      - https://www.youtube.com/watch?v=lHSLPIo1pz8
+
+  cosign:
+    title: Container Signing, Verification and Storage in an OCI registry
+    description: |
+      Cosign is a tool for container image signing and verifying maintained under the Project Sigstore
+      in collaboration with the Linux Foundation. Among other features, Cosign supports KMS signing,
+      built-in binary transparency, and timestamping service with Rekor and Kubernetes policy enforcement.
+    labels:
+      category: security
+      layer: application
+    software:
+      - cosign
+    inventors:
+      - sigstore
+    code:
+      - https://docs.sigstore.dev/cosign/attestation#validate-in-toto-attestations
+      - https://github.com/sigstore/cosign-gatekeeper-provider
+    vides:
+      - https://www.youtube.com/watch?v=gCi9_4NYyR0
+
+  alfred:
+    title: Self-hosted Alternative to OPA Playground
+    description:  |
+      Alfred introduces a local graphical user interface to interact with Open Policy Agent and acts as an alternative to OPA's playground, allowing the user to keep information related to policy testing locally.
+    labels:
+      layer: network
+      category: application
+    software:
+      - alfred
+    code:
+      - https://github.com/dolevf/Open-Policy-Agent-Alfred
 
   open-policy-registry:
     title: Open Policy Registry
     description:  |
-      The Open Policy Registry project provides a docker workflow for OPA policies. The policy CLI can be used to build, tag, sign, push, and pull OPA policies as OCIv2 container images, 
-      in conjunction with any container registry. The Open Policy Registry (OPCR) is a reference implementation of a policy registry, built and hosted on GCP. 
+      The Open Policy Registry project provides a docker workflow for OPA policies. The policy CLI can be used to build, tag, sign, push, and pull OPA policies as OCIv2 container images,
+      in conjunction with any container registry. The Open Policy Registry (OPCR) is a reference implementation of a policy registry, built and hosted on GCP.
     labels:
       category: containers
       layer: application
@@ -1146,7 +1333,7 @@ integrations:
   aserto:
     title: Aserto
     description:  |
-      Aserto is a cloud-native authorization service that makes it easy to add permissions and RBAC to your SaaS application. 
+      Aserto is a cloud-native authorization service that makes it easy to add permissions and RBAC to your SaaS applications and APIs.
       Aserto is based on the Open Policy Agent.
     labels:
       category: authorization
@@ -1158,13 +1345,16 @@ integrations:
       - aserto
     code:
       - https://github.com/aserto-dev
+      - https://github.com/opcr-io
     tutorials:
-      - https://docs.aserto.com/docs/
+      - https://docs.aserto.com/docs
     blogs:
       - https://www.aserto.com/blog/how-do-aserto-rego-policies-work
       - https://www.aserto.com/blog/testing-rego-policies
       - https://www.aserto.com/blog/aserto-on-aserto-an-opa-authorization-policy-for-aserto-tenants
       - https://www.aserto.com/blog/rego-getting-started
+    videos:
+      - https://www.youtube.com/watch?v=RJkgmdjJn_w
 
   emissary-ingress:
     title: Emissary-Ingress
@@ -1178,6 +1368,128 @@ integrations:
       - emissary-ingress
     blogs:
       - https://www.infracloud.io/blogs/emissary-ingress-opa-integration/
+
+  magda:
+    title: Magda
+    description:  |
+      Magda is a federated, Kubernetes-based, open-source data catalog system.
+      Working as Magda's central authorisation policy engine, OPA helps not only the API endpoint authorisation.
+      Magda also uses its partial evaluation feature to translate datasets authorisation decisions to other database-specific DSLs (e.g. SQL or Elasticsearch DSL) and use them for dataset authorisation enforcement in different databases.
+    labels:
+      type: poweredbyopa
+      category: application
+      layer: application
+    software:
+      - magda
+    code:
+      - https://github.com/magda-io/magda
+    blogs:
+      - https://github.com/magda-io/magda/blob/master/docs/docs/architecture/Guide%20to%20Magda%20Internals.md#authorization-authz
+
+  sansshell:
+    title: Sansshell
+    description: A non-interactive daemon for host management
+    software:
+      - sansshell
+    labels:
+      category: management
+      layer: server
+      type: poweredbyopa
+    code:
+      - https://github.com/Snowflake-Labs/sansshell
+    blogs:
+      - https://www.snowflake.com/blog/sansshell-local-host-agent/
+    inventors:
+      - snowflake
+
+  rond:
+    title: Rönd
+    description: |
+      Rönd is a lightweight container that distributes security policy enforcement throughout your application.
+    software:
+      - rond
+    labels:
+      category: authorization
+      layer: application
+    code:
+      - https://github.com/rond-authz/rond
+    tutorials:
+      - https://github.com/rond-authz/example
+    videos:
+      - title: "Rönd - The Open Source K8s sidecar that defines security policies over your APIs"
+        speakers:
+          - name: Federico Maggi
+            organization: mia-platform
+        link: https://youtu.be/ubT31NtHV8w
+    inventors:
+      - mia-platform
+    blogs:
+      - https://blog.mia-platform.eu/en/announcing-rond-new-open-source-security-enforcement-over-your-apis
+      - https://blog.mia-platform.eu/en/how-why-adopted-role-based-access-control-rbac
+
+  waltid:
+    title: walt.id
+    description:  |
+      Verifying W3C Verifiable Credentials for building SSI (Self-Sovereign Identity) use cases.
+    labels:
+      category: authorization
+      layer: application
+      type: poweredbyopa
+    inventors:
+      - waltid
+      - blockchainlabum
+      - netis
+    software:
+      - ssikit
+    code:
+      - https://github.com/walt-id/waltid-ssikit
+    tutorials:
+      - https://docs.walt.id/v/ssikit/ssi-kit/open-policy-agent
+      - https://docs.walt.id/v/ssikit/concepts/verification-policies/dynamic-policies
+    videos:
+      - title: "Verifying W3C Verifiable Credentials with the SSI Kit using OPA (Open Policy Agent)"
+        speakers:
+          - name: Severin Stampler
+            organization: waltid
+        link: https://youtu.be/mue4UjzOZ3Q
+
+  graphql:
+    title: GraphQL
+    description:  |
+      GraphQL is a query language for APIs and a runtime for fulfilling those queries with your existing data.
+    labels:
+      category: network
+      layer: application
+    software:
+      - graphql
+    code:
+      - https://github.com/StyraInc/graphql-apollo-example
+    tutorials:
+      - https://www.openpolicyagent.org/docs/graphql-api-authorization/
+
+  spacelift:
+     title: Spacelift
+     description: Spacelift is a sophisticated CI/CD platform for Infrastructure as Code including Terraform, Pulumi, CloudFormation, Kubernetes, and Ansible. Spacelift utilizes Open Policy Agent to support a variety of policy types within the platform and Policy as Code for secure and compliance Infrastructure as Code.
+     labels:
+       category: Infrastructure as Code
+       layer: cicd
+     software:
+       - terraform
+       - pulumi
+       - cloudformation
+       - kubernetes
+       - ansible
+       - aws
+       - gcp
+       - azure
+     tutorials:
+       - https://docs.spacelift.io/concepts/policy
+     code:
+       - https://github.com/spacelift-io/spacelift-policies-example-library
+     inventors:
+       - spacelift
+     blogs:
+       - https://spacelift.io/blog/what-is-open-policy-agent-and-how-it-works
 
 organizations:
   styra:
@@ -1279,6 +1591,9 @@ organizations:
   scalr:
     name: Scalr
     link: https://www.scalr.com/
+  sigstore:
+    name: Sigstore
+    link: https://sigstore.dev/
   build.security:
     name: build.security
     link: https://build.security
@@ -1315,8 +1630,35 @@ organizations:
   aserto:
     name: Aserto
     link: https://www.aserto.com
+  snowflake:
+    name: Snowflake
+    link: https://www.snowflake.com/
+  pulumi:
+    name: Pulumi
+    link: https://www.pulumi.com/
+  mia-platform:
+    name: Mia-Platform
+    link: https://mia-platform.eu/
+  waltid:
+    name: walt.id
+    link: https://walt.id
+  blockchainlabum:
+    name: Blockchain Lab:UM
+    link: https://blockchain-lab.um.si
+  netis:
+    name: Netis
+    link:  http://netis.si/en/
+  spacelift:
+    name: Spacelift
+    link: https://spacelift.io
 
 software:
+  oauth:
+    name: OAuth
+    link: https://oauth.net/
+  oidc:
+    name: OpenID Connect (OIDC)
+    link: https://openid.net/connect/
   dapr:
     name: Dapr
     link: https://dapr.io/
@@ -1350,6 +1692,9 @@ software:
   clojure:
     name: Clojure
     link: https://clojure.org
+  cosign:
+    name: Cosign
+    link: https://github.com/sigstore/cosign
   aws:
     name: Amazon Public Cloud
     link: https://aws.com
@@ -1359,6 +1704,15 @@ software:
   azure:
     name: Microsoft Public Cloud
     link: https://azure.microsoft.com/
+  cloudformation:
+    name: AWS CloudFormation
+    link: https://aws.amazon.com/cloudformation/
+  fiber:
+    name: Fiber
+    link: https://docs.gofiber.io
+  golang:
+    name: golang
+    link: https://golang.org/
   java:
     name: Java
     link: https://www.java.com/
@@ -1509,3 +1863,33 @@ software:
   emissary-ingress:
     name: Emissary-Ingress
     link: https://github.com/emissary-ingress/emissary
+  magda:
+    name: Magda
+    link: https://github.com/magda-io/magda
+  google-kubernetes-engine:
+    name: Google Kubernetes Engine
+    link: https://cloud.google.com/kubernetes-engine/
+  sansshell:
+    name: Sansshell
+    link: https://github.com/Snowflake-Labs/sansshell
+  nginx:
+    name: Nginx
+    link: https://nginx.org/
+  pulumi:
+    name: Pulumi
+    link: https://www.pulumi.com/
+  alfred:
+    name: alfred
+    link: https://github.com/dolevf/Open-Policy-Agent-Alfred
+  rond:
+    name: Rönd
+    link: https://rond-authz.io/
+  ssikit:
+    name: ssikit
+    link: https://walt.id/ssi-kit
+  graphql:
+    name: graphql
+    link: https://graphql.org/
+  ansible:
+    name: Ansible
+    link: https://www.ansible.com

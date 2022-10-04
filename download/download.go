@@ -18,13 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-policy-agent/opa/plugins"
-
-	"github.com/pkg/errors"
-
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/metrics"
+	"github.com/open-policy-agent/opa/plugins"
 	"github.com/open-policy-agent/opa/plugins/rest"
 	"github.com/open-policy-agent/opa/util"
 )
@@ -42,6 +39,7 @@ type Update struct {
 	Error   error
 	Metrics metrics.Metrics
 	Raw     io.Reader
+	Size    int
 }
 
 // Downloader implements low-level OPA bundle downloading. Downloader can be
@@ -65,6 +63,8 @@ type Downloader struct {
 	stopped            bool
 	persist            bool
 	longPollingEnabled bool
+	lazyLoadingMode    bool
+	bundleName         string
 }
 
 type downloaderResponse struct {
@@ -72,6 +72,7 @@ type downloaderResponse struct {
 	raw      io.Reader
 	etag     string
 	longPoll bool
+	size     int
 }
 
 // New returns a new Downloader that can be started.
@@ -115,6 +116,21 @@ func (d *Downloader) WithSizeLimitBytes(n int64) *Downloader {
 // WithBundlePersistence specifies if the downloaded bundle will eventually be persisted to disk.
 func (d *Downloader) WithBundlePersistence(persist bool) *Downloader {
 	d.persist = persist
+	return d
+}
+
+// WithLazyLoadingMode specifies how the downloaded bundle should be read.
+// If true, data files in the bundle will not be deserialized
+// and the check to validate that the bundle data does not contain paths
+// outside the bundle's roots will not be performed while reading the bundle.
+func (d *Downloader) WithLazyLoadingMode(yes bool) *Downloader {
+	d.lazyLoadingMode = yes
+	return d
+}
+
+// WithBundleName specifies the name of the downloaded bundle.
+func (d *Downloader) WithBundleName(bundleName string) *Downloader {
+	d.bundleName = bundleName
 	return d
 }
 
@@ -252,7 +268,7 @@ func (d *Downloader) oneShot(ctx context.Context) error {
 	d.longPollingEnabled = resp.longPoll
 
 	if d.f != nil {
-		d.f(ctx, Update{ETag: resp.etag, Bundle: resp.b, Error: nil, Metrics: m, Raw: resp.raw})
+		d.f(ctx, Update{ETag: resp.etag, Bundle: resp.b, Error: nil, Metrics: m, Raw: resp.raw, Size: resp.size})
 	}
 	return nil
 }
@@ -285,7 +301,7 @@ func (d *Downloader) download(ctx context.Context, m metrics.Metrics) (*download
 	resp, err := d.client.Do(ctx, "GET", d.path)
 	m.Timer(metrics.BundleRequest).Stop()
 	if err != nil {
-		return nil, errors.Wrap(err, "request failed")
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
 	defer util.Close(resp)
@@ -299,15 +315,16 @@ func (d *Downloader) download(ctx context.Context, m metrics.Metrics) (*download
 			defer m.Timer(metrics.RegoLoadBundles).Stop()
 			baseURL := path.Join(d.client.Config().URL, d.path)
 
-			var loader bundle.DirectoryLoader
-			if d.persist {
-				tee := io.TeeReader(resp.Body, &buf)
-				loader = bundle.NewTarballLoaderWithBaseURL(tee, baseURL)
-			} else {
-				loader = bundle.NewTarballLoaderWithBaseURL(resp.Body, baseURL)
-			}
+			loader := bundle.NewTarballLoaderWithBaseURL(io.TeeReader(resp.Body, &buf), baseURL)
 
-			reader := bundle.NewCustomReader(loader).WithMetrics(m).WithBundleVerificationConfig(d.bvc)
+			etag := resp.Header.Get("ETag")
+
+			reader := bundle.NewCustomReader(loader).
+				WithMetrics(m).
+				WithBundleVerificationConfig(d.bvc).
+				WithBundleEtag(etag).
+				WithLazyLoadingMode(d.lazyLoadingMode).
+				WithBundleName(d.bundleName)
 			if d.sizeLimitBytes != nil {
 				reader = reader.WithSizeLimitBytes(*d.sizeLimitBytes)
 			}
@@ -337,8 +354,9 @@ func (d *Downloader) download(ctx context.Context, m metrics.Metrics) (*download
 			return &downloaderResponse{
 				b:        &b,
 				raw:      &buf,
-				etag:     resp.Header.Get("ETag"),
+				etag:     etag,
 				longPoll: isLongPollSupported(resp.Header),
+				size:     buf.Len(),
 			}, nil
 		}
 

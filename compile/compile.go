@@ -9,23 +9,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/pkg/errors"
-
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/internal/compiler/wasm"
 	"github.com/open-policy-agent/opa/internal/debug"
-	"github.com/open-policy-agent/opa/internal/ir"
 	"github.com/open-policy-agent/opa/internal/planner"
 	"github.com/open-policy-agent/opa/internal/ref"
 	initload "github.com/open-policy-agent/opa/internal/runtime/init"
 	"github.com/open-policy-agent/opa/internal/wasm/encoding"
+	"github.com/open-policy-agent/opa/ir"
 	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/storage"
@@ -58,24 +57,26 @@ const resultVar = ast.Var("result")
 
 // Compiler implements bundle compilation and linking.
 type Compiler struct {
-	capabilities      *ast.Capabilities          // the capabilities that compiled policies may require
-	bundle            *bundle.Bundle             // the bundle that the compiler operates on
-	revision          *string                    // the revision to set on the output bundle
-	asBundle          bool                       // whether to assume bundle layout on file loading or not
-	filter            loader.Filter              // filter to apply to file loader
-	paths             []string                   // file paths to load. TODO(tsandall): add support for supplying readers for embedded users.
-	entrypoints       orderedStringSet           // policy entrypoints required for optimization and certain targets
-	optimizationLevel int                        // how aggressive should optimization be
-	target            string                     // target type (wasm, rego, etc.)
-	output            *io.Writer                 // output stream to write bundle to
-	entrypointrefs    []*ast.Term                // validated entrypoints computed from default decision or manually supplied entrypoints
-	compiler          *ast.Compiler              // rego ast compiler used for semantic checks and rewriting
-	policy            *ir.Policy                 // planner output when wasm or plan targets are enabled
-	debug             debug.Debug                // optionally outputs debug information produced during build
-	bvc               *bundle.VerificationConfig // represents the key configuration used to verify a signed bundle
-	bsc               *bundle.SigningConfig      // represents the key configuration used to generate a signed bundle
-	keyID             string                     // represents the name of the default key used to verify a signed bundle
-	metadata          *map[string]interface{}    // represents additional data included in .manifest file
+	capabilities          *ast.Capabilities          // the capabilities that compiled policies may require
+	bundle                *bundle.Bundle             // the bundle that the compiler operates on
+	revision              *string                    // the revision to set on the output bundle
+	asBundle              bool                       // whether to assume bundle layout on file loading or not
+	pruneUnused           bool                       // whether to extend the entrypoint set for semantic equivalence of built bundles
+	filter                loader.Filter              // filter to apply to file loader
+	paths                 []string                   // file paths to load. TODO(tsandall): add support for supplying readers for embedded users.
+	entrypoints           orderedStringSet           // policy entrypoints required for optimization and certain targets
+	optimizationLevel     int                        // how aggressive should optimization be
+	target                string                     // target type (wasm, rego, etc.)
+	output                *io.Writer                 // output stream to write bundle to
+	entrypointrefs        []*ast.Term                // validated entrypoints computed from default decision or manually supplied entrypoints
+	compiler              *ast.Compiler              // rego ast compiler used for semantic checks and rewriting
+	policy                *ir.Policy                 // planner output when wasm or plan targets are enabled
+	debug                 debug.Debug                // optionally outputs debug information produced during build
+	enablePrintStatements bool                       // optionally enable rego print statements
+	bvc                   *bundle.VerificationConfig // represents the key configuration used to verify a signed bundle
+	bsc                   *bundle.SigningConfig      // represents the key configuration used to generate a signed bundle
+	keyID                 string                     // represents the name of the default key used to verify a signed bundle
+	metadata              *map[string]interface{}    // represents additional data included in .manifest file
 }
 
 // New returns a new compiler instance that can be invoked.
@@ -97,6 +98,20 @@ func (c *Compiler) WithRevision(r string) *Compiler {
 // WithAsBundle sets file loading mode on the compiler.
 func (c *Compiler) WithAsBundle(enabled bool) *Compiler {
 	c.asBundle = enabled
+	return c
+}
+
+// WithPruneUnused will make rules be ignored that are defined on the same
+// package as the entrypoint, but that are not in the entrypoint set.
+//
+// Notably this includes functions (they can't be entrypoints) and causes
+// the built bundle to no longer be semantically equivalent to the bundle built
+// without wasm.
+//
+// This affects the 'wasm' and 'plan' targets only. It has no effect on
+// building 'rego' bundles, i.e., "ordinary bundles".
+func (c *Compiler) WithPruneUnused(enabled bool) *Compiler {
+	c.pruneUnused = enabled
 	return c
 }
 
@@ -133,6 +148,14 @@ func (c *Compiler) WithDebug(sink io.Writer) *Compiler {
 	if sink != nil {
 		c.debug = debug.New(sink)
 	}
+	return c
+}
+
+// WithEnablePrintStatements enables print statements inside of modules compiled
+// by the compiler. If print statements are not enabled, calls to print() are
+// erased at compile-time.
+func (c *Compiler) WithEnablePrintStatements(yes bool) *Compiler {
+	c.enablePrintStatements = yes
 	return c
 }
 
@@ -181,7 +204,7 @@ func (c *Compiler) WithCapabilities(capabilities *ast.Capabilities) *Compiler {
 	return c
 }
 
-//WithMetadata sets the additional data to be included in .manifest
+// WithMetadata sets the additional data to be included in .manifest
 func (c *Compiler) WithMetadata(metadata *map[string]interface{}) *Compiler {
 	c.metadata = metadata
 	return c
@@ -315,7 +338,7 @@ func (c *Compiler) initBundle() error {
 
 	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false)
 	if err != nil {
-		return errors.Wrap(err, "load error")
+		return fmt.Errorf("load error: %w", err)
 	}
 
 	if c.asBundle {
@@ -349,7 +372,7 @@ func (c *Compiler) initBundle() error {
 	result.Manifest.Init()
 	result.Data = load.Files.Documents
 
-	var modules []string
+	modules := make([]string, 0, len(load.Files.Modules))
 
 	for k := range load.Files.Modules {
 		modules = append(modules, k)
@@ -375,14 +398,15 @@ func (c *Compiler) optimize(ctx context.Context) error {
 
 	if c.optimizationLevel <= 0 {
 		var err error
-		c.compiler, err = compile(c.capabilities, c.bundle, c.debug)
+		c.compiler, err = compile(c.capabilities, c.bundle, c.debug, c.enablePrintStatements)
 		return err
 	}
 
 	o := newOptimizer(c.capabilities, c.bundle).
 		WithEntrypoints(c.entrypointrefs).
 		WithDebug(c.debug.Writer()).
-		WithShallowInlining(c.optimizationLevel <= 1)
+		WithShallowInlining(c.optimizationLevel <= 1).
+		WithEnablePrintStatements(c.enablePrintStatements)
 
 	err := o.Do(ctx)
 	if err != nil {
@@ -394,50 +418,53 @@ func (c *Compiler) optimize(ctx context.Context) error {
 	return nil
 }
 
-func (c *Compiler) compilePlan(ctx context.Context) error {
+func (c *Compiler) compilePlan(context.Context) error {
 
 	// Lazily compile the modules if needed. If optimizations were run, the
 	// AST compiler will not be set because the default target does not require it.
 	if c.compiler == nil {
 		var err error
-		c.compiler, err = compile(c.capabilities, c.bundle, c.debug)
+		c.compiler, err = compile(c.capabilities, c.bundle, c.debug, c.enablePrintStatements)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Find transitive dependents of entrypoints and add them to the set to compile.
-	//
-	// NOTE(tsandall): We compile entrypoints because the evaluator does not support
-	// evaluation of wasm-compiled rules when 'with' statements are in-scope. Compiling
-	// out the dependents avoids the need to support that case for now.
-	deps := map[*ast.Rule]struct{}{}
-	for i := range c.entrypointrefs {
-		transitiveDocumentDependents(c.compiler, c.entrypointrefs[i], deps)
-	}
-
-	extras := ast.NewSet()
-	for rule := range deps {
-		extras.Add(ast.NewTerm(rule.Path()))
-	}
-
-	sorted := extras.Sorted()
-
-	for i := 0; i < sorted.Len(); i++ {
-		p, err := sorted.Elem(i).Value.(ast.Ref).Ptr()
-		if err != nil {
-			return err
+	if !c.pruneUnused {
+		// Find transitive dependents of entrypoints and add them to the set to compile.
+		//
+		// NOTE(tsandall): We compile entrypoints because the evaluator does not support
+		// evaluation of wasm-compiled rules when 'with' statements are in-scope. Compiling
+		// out the dependents avoids the need to support that case for now.
+		deps := map[*ast.Rule]struct{}{}
+		for i := range c.entrypointrefs {
+			transitiveDocumentDependents(c.compiler, c.entrypointrefs[i], deps)
 		}
 
-		if !c.entrypoints.Contains(p) {
-			c.entrypoints = append(c.entrypoints, p)
-			c.entrypointrefs = append(c.entrypointrefs, sorted.Elem(i))
+		extras := ast.NewSet()
+		for rule := range deps {
+			extras.Add(ast.NewTerm(rule.Path()))
+		}
+
+		sorted := extras.Sorted()
+
+		for i := 0; i < sorted.Len(); i++ {
+			p, err := sorted.Elem(i).Value.(ast.Ref).Ptr()
+			if err != nil {
+				return err
+			}
+
+			if !c.entrypoints.Contains(p) {
+				c.entrypoints = append(c.entrypoints, p)
+				c.entrypointrefs = append(c.entrypointrefs, sorted.Elem(i))
+			}
 		}
 	}
 
 	// Create query sets for each of the entrypoints.
 	resultSym := ast.NewTerm(resultVar)
 	queries := make([]planner.QuerySet, len(c.entrypointrefs))
+	var unmappedEntrypoints []string
 
 	for i := range c.entrypointrefs {
 
@@ -448,11 +475,20 @@ func (c *Compiler) compilePlan(ctx context.Context) error {
 			return err
 		}
 
+		if len(c.compiler.GetRules(c.entrypointrefs[i].Value.(ast.Ref))) == 0 {
+			unmappedEntrypoints = append(unmappedEntrypoints, c.entrypoints[i])
+		}
+
 		queries[i] = planner.QuerySet{
 			Name:          c.entrypoints[i],
 			Queries:       []ast.Body{compiled},
 			RewrittenVars: qc.RewrittenVars(),
 		}
+	}
+
+	if len(unmappedEntrypoints) > 0 {
+		return fmt.Errorf("entrypoint %q does not refer to a rule or policy decision", unmappedEntrypoints[0])
+
 	}
 
 	// Prepare modules and builtins for the planner.
@@ -477,7 +513,7 @@ func (c *Compiler) compilePlan(ctx context.Context) error {
 		return err
 	}
 
-	// dump policy IR (if "debug" wasn't requested, debug.Witer will discard it)
+	// dump policy IR (if "debug" wasn't requested, debug.Writer will discard it)
 	err = ir.Pretty(c.debug.Writer(), policy)
 	if err != nil {
 		return err
@@ -616,15 +652,16 @@ func (err undefinedEntrypointErr) Error() string {
 }
 
 type optimizer struct {
-	capabilities    *ast.Capabilities
-	bundle          *bundle.Bundle
-	compiler        *ast.Compiler
-	entrypoints     []*ast.Term
-	nsprefix        string
-	resultsymprefix string
-	outputprefix    string
-	shallow         bool
-	debug           debug.Debug
+	capabilities          *ast.Capabilities
+	bundle                *bundle.Bundle
+	compiler              *ast.Compiler
+	entrypoints           []*ast.Term
+	nsprefix              string
+	resultsymprefix       string
+	outputprefix          string
+	shallow               bool
+	debug                 debug.Debug
+	enablePrintStatements bool
 }
 
 func newOptimizer(c *ast.Capabilities, b *bundle.Bundle) *optimizer {
@@ -642,6 +679,11 @@ func (o *optimizer) WithDebug(sink io.Writer) *optimizer {
 	if sink != nil {
 		o.debug = debug.New(sink)
 	}
+	return o
+}
+
+func (o *optimizer) WithEnablePrintStatements(yes bool) *optimizer {
+	o.enablePrintStatements = yes
 	return o
 }
 
@@ -671,7 +713,7 @@ func (o *optimizer) Do(ctx context.Context) error {
 		data = map[string]interface{}{}
 	}
 
-	store := inmem.NewFromObject(data)
+	store := inmem.NewFromObjectWithOpts(data, inmem.OptRoundTripOnWrite(false))
 	resultsym := ast.VarTerm(o.resultsymprefix + "__result__")
 	usedFilenames := map[string]int{}
 	var unknowns []*ast.Term
@@ -684,7 +726,7 @@ func (o *optimizer) Do(ctx context.Context) error {
 	for i, e := range o.entrypoints {
 
 		var err error
-		o.compiler, err = compile(o.capabilities, o.bundle, o.debug)
+		o.compiler, err = compile(o.capabilities, o.bundle, o.debug, o.enablePrintStatements)
 		if err != nil {
 			return err
 		}
@@ -782,7 +824,7 @@ func (o *optimizer) findRequiredDocuments(ref *ast.Term) []string {
 		})
 	}
 
-	var result []string
+	result := make([]string, 0, len(keep))
 
 	for k := range keep {
 		result = append(result, k)
@@ -940,7 +982,7 @@ func (o *optimizer) getSupportModuleFilename(used map[string]int, module *ast.Mo
 
 var safePathPattern = regexp.MustCompile(`^[\w-_/]+$`)
 
-func compile(c *ast.Capabilities, b *bundle.Bundle, dbg debug.Debug) (*ast.Compiler, error) {
+func compile(c *ast.Capabilities, b *bundle.Bundle, dbg debug.Debug, enablePrintStatements bool) (*ast.Compiler, error) {
 
 	modules := map[string]*ast.Module{}
 
@@ -952,7 +994,7 @@ func compile(c *ast.Capabilities, b *bundle.Bundle, dbg debug.Debug) (*ast.Compi
 		modules[mf.URL] = mf.Parsed
 	}
 
-	compiler := ast.NewCompiler().WithCapabilities(c).WithDebug(dbg.Writer())
+	compiler := ast.NewCompiler().WithCapabilities(c).WithDebug(dbg.Writer()).WithEnablePrintStatements(enablePrintStatements)
 	compiler.Compile(modules)
 
 	if compiler.Failed() {

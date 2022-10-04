@@ -12,11 +12,10 @@ package ast
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
-
-	"github.com/pkg/errors"
 )
 
 // MustParseBody returns a parsed body.
@@ -173,30 +172,15 @@ func ParseRuleFromExpr(module *Module, expr *Expr) (*Rule, error) {
 		return nil, errors.New("expression cannot be used for rule head")
 	}
 
-	if expr.IsAssignment() {
-
-		lhs, rhs := expr.Operand(0), expr.Operand(1)
-		if lhs == nil || rhs == nil {
-			return nil, errors.New("assignment requires two operands")
-		}
-
-		rule, err := ParseCompleteDocRuleFromAssignmentExpr(module, lhs, rhs)
-
-		if err == nil {
-			rule.Location = expr.Location
-			rule.Head.Location = expr.Location
-			return rule, nil
-		} else if _, ok := lhs.Value.(Call); ok {
-			return nil, errFunctionAssignOperator
-		} else if _, ok := lhs.Value.(Ref); ok {
-			return nil, errPartialRuleAssignOperator
-		}
-
-		return nil, errTermAssignOperator(lhs.Value)
-	}
-
 	if expr.IsEquality() {
 		return parseCompleteRuleFromEq(module, expr)
+	} else if expr.IsAssignment() {
+		rule, err := parseCompleteRuleFromEq(module, expr)
+		if err != nil {
+			return nil, err
+		}
+		rule.Head.Assign = true
+		return rule, nil
 	}
 
 	if _, ok := BuiltinMap[expr.Operator().String()]; ok {
@@ -447,10 +431,13 @@ func ParseModuleWithOpts(filename, input string, popts ParserOptions) (*Module, 
 // ParseBody returns exactly one body.
 // If multiple bodies are parsed, an error is returned.
 func ParseBody(input string) (Body, error) {
-	return ParseBodyWithOpts(input, ParserOptions{})
+	return ParseBodyWithOpts(input, ParserOptions{SkipRules: true})
 }
 
+// ParseBodyWithOpts returns exactly one body. It does _not_ set SkipRules: true on its own,
+// but respects whatever ParserOptions it's been given.
 func ParseBodyWithOpts(input string, popts ParserOptions) (Body, error) {
+
 	stmts, _, err := ParseStatementsWithOpts("", input, popts)
 	if err != nil {
 		return nil, err
@@ -479,7 +466,7 @@ func ParseBodyWithOpts(input string, popts ParserOptions) (Body, error) {
 func ParseExpr(input string) (*Expr, error) {
 	body, err := ParseBody(input)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse expression")
+		return nil, fmt.Errorf("failed to parse expression: %w", err)
 	}
 	if len(body) != 1 {
 		return nil, fmt.Errorf("expected exactly one expression but got: %v", body)
@@ -512,7 +499,7 @@ func ParseTerm(input string) (*Term, error) {
 func ParseTermWithOpts(input string, popts ParserOptions) (*Term, error) {
 	body, err := ParseBodyWithOpts(input, popts)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse term")
+		return nil, fmt.Errorf("failed to parse term: %w", err)
 	}
 	if len(body) != 1 {
 		return nil, fmt.Errorf("expected exactly one term but got: %v", body)
@@ -528,7 +515,7 @@ func ParseTermWithOpts(input string, popts ParserOptions) (*Term, error) {
 func ParseRef(input string) (Ref, error) {
 	term, err := ParseTerm(input)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse ref")
+		return nil, fmt.Errorf("failed to parse ref: %w", err)
 	}
 	ref, ok := term.Value.(Ref)
 	if !ok {
@@ -585,6 +572,7 @@ func ParseStatementsWithOpts(filename, input string, popts ParserOptions) ([]Sta
 		WithFutureKeywords(popts.FutureKeywords...).
 		WithAllFutureKeywords(popts.AllFutureKeywords).
 		WithCapabilities(popts.Capabilities).
+		WithSkipRules(popts.SkipRules).
 		withUnreleasedKeywords(popts.unreleasedKeywords)
 
 	stmts, comments, errs := parser.Parse()
@@ -604,14 +592,15 @@ func parseModule(filename string, stmts []Statement, comments []*Comment) (*Modu
 
 	var errs Errors
 
-	_package, ok := stmts[0].(*Package)
+	pkg, ok := stmts[0].(*Package)
 	if !ok {
 		loc := stmts[0].Loc()
 		errs = append(errs, NewError(ParseErr, loc, "package expected"))
 	}
 
 	mod := &Module{
-		Package: _package,
+		Package: pkg,
+		stmts:   stmts,
 	}
 
 	// The comments slice only holds comments that were not their own statements.
@@ -651,58 +640,13 @@ func parseModule(filename string, stmts []Statement, comments []*Comment) (*Modu
 		return nil, errs
 	}
 
-	// Find first non-annotation statement following each annotation and attach
-	// the annotation to that statement.
-	for _, a := range mod.Annotations {
-		for _, stmt := range stmts {
-			_, ok := stmt.(*Annotations)
-			if !ok {
-				if stmt.Loc().Row > a.Location.Row {
-					a.node = stmt
-					break
-				}
-			}
-		}
-
-		if a.Scope == "" {
-			switch a.node.(type) {
-			case *Rule:
-				a.Scope = annotationScopeRule
-			case *Package:
-				a.Scope = annotationScopePackage
-			case *Import:
-				a.Scope = annotationScopeImport
-			}
-		}
-
-		if err := validateAnnotationScopeAttachment(a); err != nil {
-			errs = append(errs, err)
-		}
-	}
+	errs = append(errs, attachAnnotationsNodes(mod)...)
 
 	if len(errs) > 0 {
 		return nil, errs
 	}
 
 	return mod, nil
-}
-
-func validateAnnotationScopeAttachment(a *Annotations) *Error {
-
-	switch a.Scope {
-	case annotationScopeRule, annotationScopeDocument:
-		if _, ok := a.node.(*Rule); ok {
-			return nil
-		}
-		return newScopeAttachmentErr(a, "rule")
-	case annotationScopePackage, annotationScopeSubpackages:
-		if _, ok := a.node.(*Package); ok {
-			return nil
-		}
-		return newScopeAttachmentErr(a, "package")
-	}
-
-	return NewError(ParseErr, a.Loc(), "invalid annotation scope '%v'", a.Scope)
 }
 
 func newScopeAttachmentErr(a *Annotations, want string) *Error {
