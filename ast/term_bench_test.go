@@ -147,14 +147,19 @@ func BenchmarkTermHashing(b *testing.B) {
 	}
 }
 
-var str string
-var bs []byte
+var (
+	str string
+	bs  []byte
+)
 
 // BenchmarkObjectString generates several objects of different sizes, and
 // marshals them to JSON via two ways:
-//   map[string]int -> ast.Value -> .String()
+//
+//	map[string]int -> ast.Value -> .String()
+//
 // and
-//   map[string]int -> json.Marshal()
+//
+//	map[string]int -> json.Marshal()
 //
 // The difference between these two is relevant for feeding input into the
 // wasm vm: when calling rego.New(...) with rego.Target("wasm"), it's up to
@@ -166,7 +171,6 @@ func BenchmarkObjectString(b *testing.B) {
 
 	for _, n := range sizes {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
-
 			obj := map[string]int{}
 			for i := 0; i < n; i++ {
 				obj[fmt.Sprint(i)] = i
@@ -202,7 +206,6 @@ func BenchmarkObjectStringInterfaces(b *testing.B) {
 
 	for _, n := range sizes {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
-
 			obj := map[string]int{}
 			for i := 0; i < n; i++ {
 				obj[fmt.Sprint(i)] = i
@@ -240,7 +243,7 @@ func BenchmarkObjectConstruction(b *testing.B) {
 				for i := 0; i < n; i++ {
 					es = append(es, struct{ k, v int }{i, i})
 				}
-				rand.Seed(seed)
+				rand.New(rand.NewSource(seed)) // Seed the PRNG.
 				rand.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -280,7 +283,6 @@ func BenchmarkArrayString(b *testing.B) {
 
 	for _, n := range sizes {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
-
 			obj := make([]string, n)
 			for i := 0; i < n; i++ {
 				obj[i] = fmt.Sprint(i)
@@ -348,5 +350,4 @@ func BenchmarkSetMarshalJSON(b *testing.B) {
 			})
 		})
 	}
-
 }

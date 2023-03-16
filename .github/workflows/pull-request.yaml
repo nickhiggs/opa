@@ -57,10 +57,10 @@ jobs:
 
       - id: go_version
         name: Read go version
-        run: echo "::set-output name=go_version::$(cat .go-version)"
+        run: echo "go_version=$(cat .go-version)" >> $GITHUB_OUTPUT
 
       - name: Install Go (${{ steps.go_version.outputs.go_version }})
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: ${{ steps.go_version.outputs.go_version }}
         if: matrix.os == 'darwin'
@@ -101,10 +101,10 @@ jobs:
 
       - id: go_version
         name: Read go version
-        run: echo "::set-output name=go_version::$(cat .go-version)"
+        run: echo "go_version=$(cat .go-version)" >> $GITHUB_OUTPUT
 
       - name: Install Go (${{ steps.go_version.outputs.go_version }})
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: ${{ steps.go_version.outputs.go_version }}
 
@@ -116,25 +116,6 @@ jobs:
       - name: Unit Test Golang
         run: make test-coverage
         timeout-minutes: 30
-
-  go-perf:
-    name: Go Perf
-    runs-on: ubuntu-22.04
-    needs: generate
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v3
-
-      - name: Download generated artifacts
-        uses: actions/download-artifact@v3
-        with:
-          name: generated
-
-      - name: Benchmark Test Golang
-        run: make ci-go-perf
-        timeout-minutes: 30
-        env:
-          DOCKER_RUNNING: 0
 
   go-lint:
     name: Go Lint
@@ -155,33 +136,36 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v3
 
-      - id: changed-files
-        uses: tj-actions/changed-files@v29.0.9
+      - name: Check PR for changes to Wasm
+        uses: dorny/paths-filter@v2
+        id: changes
         with:
-          files: |
-            Makefile
-            wasm/
-            ast/
-            internal/compiler/
-            internal/planner/
-            internal/wasm/
-            test/wasm/
-            test/cases/
+          filters: |
+            wasm:
+              - Makefile
+              - 'wasm/**'
+              - 'ast/**'
+              - 'internal/compiler/**'
+              - 'internal/planner/**'
+              - 'internal/wasm/**'
+              - 'test/wasm/**'
+              - 'test/cases/**'
 
       - name: Download generated artifacts
         uses: actions/download-artifact@v3
         with:
           name: generated
+        if: steps.changes.outputs.wasm == 'true'
 
       - name: Build and Test Wasm
         run: make ci-wasm
         timeout-minutes: 15
-        if: steps.changed-files.outputs.any_changed == 'true'
+        if: steps.changes.outputs.wasm == 'true'
 
       - name: Build and Test Wasm SDK
         run: make ci-go-wasm-sdk-e2e-test
         timeout-minutes: 30
-        if: steps.changed-files.outputs.any_changed == 'true'
+        if: steps.changes.outputs.wasm == 'true'
         env:
           DOCKER_RUNNING: 0
 
@@ -229,9 +213,6 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v3
-
-      - name: Download OPA
-        uses: open-policy-agent/setup-opa@v1
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -293,14 +274,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
-        version: ["1.18", "1.17"]
+        version: ["1.18", "1.19"]
     steps:
       - uses: actions/checkout@v3
       - name: Download generated artifacts
         uses: actions/download-artifact@v3
         with:
           name: generated
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ matrix.version }}
       - run: make build
@@ -320,7 +301,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Download OPA
-        uses: open-policy-agent/setup-opa@v1
+        uses: open-policy-agent/setup-opa@v2
         with:
           version: edge
 

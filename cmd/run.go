@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"time"
@@ -121,6 +120,18 @@ Use the "help input" command in the interactive shell to see more options.
 File paths can be specified as URLs to resolve ambiguity in paths containing colons:
 
     $ opa run file:///c:/path/to/data.json
+
+URL paths to remote public bundles (http or https) will be parsed as shorthand
+configuration equivalent of using repeated --set flags to accomplish the same:
+
+	$ opa run -s https://example.com/bundles/bundle.tar.gz
+
+The above shorthand command is identical to:
+
+    $ opa run -s --set "services.cli1.url=https://example.com" \
+                 --set "bundles.cli1.service=cli1" \
+                 --set "bundles.cli1.resource=/bundles/bundle.tar.gz" \
+                 --set "bundles.cli1.persist=true"
 
 The 'run' command can also verify the signature of a signed bundle.
 A signed bundle is a normal OPA bundle that includes a file
@@ -341,7 +352,7 @@ func loadCertificate(tlsCertFile, tlsPrivateKeyFile string) (*tls.Certificate, e
 }
 
 func loadCertPool(tlsCACertFile string) (*x509.CertPool, error) {
-	caCertPEM, err := ioutil.ReadFile(tlsCACertFile)
+	caCertPEM, err := os.ReadFile(tlsCACertFile)
 	if err != nil {
 		return nil, fmt.Errorf("read CA cert file: %v", err)
 	}

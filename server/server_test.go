@@ -7,9 +7,13 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,8 +25,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
@@ -40,6 +44,7 @@ import (
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/disk"
 	"github.com/open-policy-agent/opa/storage/inmem"
+	"github.com/open-policy-agent/opa/tracing"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/util/test"
 	"github.com/open-policy-agent/opa/version"
@@ -1032,6 +1037,7 @@ func TestCompileV1Observability(t *testing.T) {
 			"timer_rego_partial_eval_ns",
 			"timer_rego_query_compile_ns",
 			"timer_rego_query_parse_ns",
+			"timer_rego_module_parse_ns",
 			"timer_server_handler_ns",
 			"counter_disk_read_keys",
 			"timer_disk_read_ns",
@@ -1760,6 +1766,343 @@ func TestDataPutV1IfNoneMatch(t *testing.T) {
 	}
 }
 
+func TestDataPostV0CompressedResponse(t *testing.T) {
+	tests := []struct {
+		gzipMinLength      int
+		compressedResponse bool
+	}{
+		{
+			gzipMinLength:      3,
+			compressedResponse: true,
+		},
+		{
+			gzipMinLength:      1400,
+			compressedResponse: false,
+		},
+	}
+
+	for _, test := range tests {
+		f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"encoding":{"gzip":{"min_length": %d}}}}`, test.gzipMinLength))
+		// create the policy
+		err := f.v1(http.MethodPut, "/policies/test", `package opa.examples
+import input.example.flag
+allow_request { flag == true }
+`, 200, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// execute the request
+		req := newReqV0(http.MethodPost, "/data/opa/examples/allow_request", `{"example": {"flag": true}}`)
+		req.Header.Set("Accept-Encoding", "gzip")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+
+		// check for content encoding
+		expectedEncoding := "gzip"
+		if !test.compressedResponse {
+			expectedEncoding = ""
+		}
+		receivedEncodingHeaderValue := f.recorder.Header().Get("Content-Encoding")
+		if receivedEncodingHeaderValue != expectedEncoding {
+			t.Fatalf("Expected Content-Encoding %v but got: %v", expectedEncoding, receivedEncodingHeaderValue)
+		}
+
+		var plainOutput []byte
+		if test.compressedResponse {
+			// unzip the response
+			gzReader, err := gzip.NewReader(f.recorder.Body)
+			if err != nil {
+				t.Fatalf("Unexpected gzip error: %v", err)
+			}
+			plainOutput, err = io.ReadAll(gzReader)
+			if err != nil {
+				t.Fatalf("Unexpected error on reading the response: %v", err)
+			}
+		} else {
+			plainOutput = f.recorder.Body.Bytes()
+		}
+
+		expected := "true"
+		result := strings.TrimSuffix(string(plainOutput), "\n")
+		if plainOutput == nil || result != expected {
+			t.Fatalf("Expected %v but got: %v", expected, result)
+		}
+	}
+}
+
+func TestDataPostV1CompressedResponse(t *testing.T) {
+	tests := []struct {
+		gzipMinLength      int
+		compressedResponse bool
+	}{
+		{
+			gzipMinLength:      3,
+			compressedResponse: true,
+		},
+		{
+			gzipMinLength:      1400,
+			compressedResponse: false,
+		},
+	}
+
+	for _, test := range tests {
+		f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"encoding":{"gzip":{"min_length": %d}}}}`, test.gzipMinLength))
+		// create the policy
+		err := f.v1(http.MethodPut, "/policies/test", `package test
+default hello := false
+hello {
+	input.message == "world"
+}
+`, 200, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// execute the request
+		req := newReqV1(http.MethodPost, "/data/test", `{"input": {"message": "world"}}`)
+		req.Header.Set("Accept-Encoding", "gzip")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+
+		var result types.DataResponseV1
+
+		// check for content encoding
+		expectedEncoding := "gzip"
+		if !test.compressedResponse {
+			expectedEncoding = ""
+		}
+		receivedEncodingHeaderValue := f.recorder.Header().Get("Content-Encoding")
+		if receivedEncodingHeaderValue != expectedEncoding {
+			t.Fatalf("Expected Content-Encoding %v but got: %v", expectedEncoding, receivedEncodingHeaderValue)
+		}
+
+		if test.compressedResponse {
+			// unzip and unmarshall the response
+			gzReader, err := gzip.NewReader(f.recorder.Body)
+			if err != nil {
+				t.Fatalf("Unexpected gzip error: %v", err)
+			}
+			if err := util.NewJSONDecoder(gzReader).Decode(&result); err != nil {
+				t.Fatalf("Unexpected JSON decode error: %v", err)
+			}
+		} else {
+			// unmarshall the response
+			if err := util.NewJSONDecoder(f.recorder.Body).Decode(&result); err != nil {
+				t.Fatalf("Unexpected JSON decode error: %v", err)
+			}
+		}
+
+		var expected interface{}
+		if err := util.UnmarshalJSON([]byte(`{"hello": true}`), &expected); err != nil {
+			panic(err)
+		}
+		if result.Result == nil || !reflect.DeepEqual(*result.Result, expected) {
+			t.Fatalf("Expected %v but got: %v", expected, *result.Result)
+		}
+	}
+}
+
+func TestCompileV1CompressedResponse(t *testing.T) {
+	tests := []struct {
+		gzipMinLength      int
+		compressedResponse bool
+	}{
+		{
+			gzipMinLength:      3,
+			compressedResponse: true,
+		},
+		{
+			gzipMinLength:      1400,
+			compressedResponse: false,
+		},
+	}
+
+	for _, test := range tests {
+		f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"encoding":{"gzip":{"min_length": %d}}}}`, test.gzipMinLength))
+
+		// create the policy
+		mod := `package test
+
+	p {
+		input.x = 1
+	}
+
+	q {
+		data.a[i] = input.x
+	}
+
+	default r = true
+
+	r { input.x = 1 }
+
+	custom_func(x) { data.a[i] == x }
+
+	s { custom_func(input.x) }
+	`
+		err := f.v1(http.MethodPut, "/policies/test", mod, 200, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// execute the request
+		req := newReqV1(http.MethodPost, "/compile", `{"unknowns": ["input"], "query": "data.test.p = true"}`)
+		req.Header.Set("Accept-Encoding", "gzip")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+
+		var result types.CompileResponseV1
+
+		// check for content encoding
+		expectedEncoding := "gzip"
+		if !test.compressedResponse {
+			expectedEncoding = ""
+		}
+		receivedEncodingHeaderValue := f.recorder.Header().Get("Content-Encoding")
+		if receivedEncodingHeaderValue != expectedEncoding {
+			t.Fatalf("Expected Content-Encoding %v but got: %v", expectedEncoding, receivedEncodingHeaderValue)
+		}
+
+		if test.compressedResponse {
+			// unzip and unmarshall the response
+			gzReader, err := gzip.NewReader(f.recorder.Body)
+			if err != nil {
+				t.Fatalf("Unexpected gzip error: %v", err)
+			}
+			if err := util.NewJSONDecoder(gzReader).Decode(&result); err != nil {
+				t.Fatalf("Unexpected JSON decode error: %v", err)
+			}
+		} else {
+			// unmarshall the response
+			if err := util.NewJSONDecoder(f.recorder.Body).Decode(&result); err != nil {
+				t.Fatalf("Unexpected JSON decode error: %v", err)
+			}
+		}
+
+		var expected interface{}
+		expectedStr := fmt.Sprintf(`{"queries": [%v]}`, string(util.MustMarshalJSON(ast.MustParseBody("input.x = 1"))))
+		if err := util.UnmarshalJSON([]byte(expectedStr), &expected); err != nil {
+			panic(err)
+		}
+
+		if result.Result == nil || !reflect.DeepEqual(*result.Result, expected) {
+			t.Fatalf("Expected %v but got: %v", expected, *result.Result)
+		}
+	}
+}
+
+func TestDataPostV0CompressedRequest(t *testing.T) {
+	f := newFixture(t)
+	// create the policy
+	err := f.v1(http.MethodPut, "/policies/test", `package opa.examples
+import input.example.flag
+allow_request { flag == true }
+`, 200, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// execute the request
+	compressedBoy := zipString(`{"example": {"flag": true}}`)
+	req := newStreamedReqV0(http.MethodPost, "/data/opa/examples/allow_request", bytes.NewReader(compressedBoy))
+	req.Header.Set("Content-Encoding", "gzip")
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, req)
+
+	expected := "true"
+	result := strings.TrimSuffix(f.recorder.Body.String(), "\n")
+	if result != expected {
+		t.Fatalf("Expected %v but got: %v", expected, result)
+	}
+}
+
+func TestDataPostV1CompressedRequest(t *testing.T) {
+	f := newFixture(t)
+	// create the policy
+	err := f.v1(http.MethodPut, "/policies/test", `package test
+default hello := false
+hello {
+	input.message == "world"
+}
+`, 200, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// execute the request
+	compressedBoy := zipString(`{"input": {"message": "world"}}`)
+	req := newStreamedReqV1(http.MethodPost, "/data/test", bytes.NewReader(compressedBoy))
+	req.Header.Set("Content-Encoding", "gzip")
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, req)
+
+	var result types.DataResponseV1
+
+	// unmarshall the response
+	if err := util.NewJSONDecoder(f.recorder.Body).Decode(&result); err != nil {
+		t.Fatalf("Unexpected JSON decode error: %v", err)
+	}
+
+	var expected interface{}
+	if err := util.UnmarshalJSON([]byte(`{"hello": true}`), &expected); err != nil {
+		panic(err)
+	}
+	if result.Result == nil || !reflect.DeepEqual(*result.Result, expected) {
+		t.Fatalf("Expected %v but got: %v", expected, *result.Result)
+	}
+}
+
+func TestCompileV1CompressedRequest(t *testing.T) {
+	f := newFixture(t)
+	// create the policy
+	mod := `package test
+
+	p {
+		input.x = 1
+	}
+
+	q {
+		data.a[i] = input.x
+	}
+
+	default r = true
+
+	r { input.x = 1 }
+
+	custom_func(x) { data.a[i] == x }
+
+	s { custom_func(input.x) }
+	`
+	err := f.v1(http.MethodPut, "/policies/test", mod, 200, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// execute the request
+	compressedBoy := zipString(`{"unknowns": ["input"], "query": "data.test.p = true"}`)
+	req := newStreamedReqV1(http.MethodPost, "/compile", bytes.NewReader(compressedBoy))
+	req.Header.Set("Content-Encoding", "gzip")
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, req)
+
+	var result types.CompileResponseV1
+
+	// unmarshall the response
+	if err := util.NewJSONDecoder(f.recorder.Body).Decode(&result); err != nil {
+		t.Fatalf("Unexpected JSON decode error: %v", err)
+	}
+
+	var expected interface{}
+	expectedStr := fmt.Sprintf(`{"queries": [%v]}`, string(util.MustMarshalJSON(ast.MustParseBody("input.x = 1"))))
+	if err := util.UnmarshalJSON([]byte(expectedStr), &expected); err != nil {
+		panic(err)
+	}
+
+	if result.Result == nil || !reflect.DeepEqual(*result.Result, expected) {
+		t.Fatalf("Expected %v but got: %v", expected, *result.Result)
+	}
+}
+
 func TestBundleScope(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2043,13 +2386,23 @@ func TestDataGetExplainFull(t *testing.T) {
 		t.Fatalf("Expected exactly %d events but got %d", nexpect, len(explain))
 	}
 
-	_, ok := explain[2].Node.(ast.Body)
-	if !ok {
-		t.Fatalf("Expected body for node but got: %v", explain[2].Node)
+	exitEvent := -1
+	for i := 0; i < len(explain) && exitEvent < 0; i++ {
+		if explain[i].Op == "exit" {
+			exitEvent = i
+		}
+	}
+	if exitEvent < 0 {
+		t.Fatalf("Expected one exit node but found none")
 	}
 
-	if len(explain[2].Locals) != 1 {
-		t.Fatalf("Expected one binding but got: %v", explain[2].Locals)
+	_, ok := explain[exitEvent].Node.(ast.Body)
+	if !ok {
+		t.Fatalf("Expected body for node but got: %v", explain[exitEvent].Node)
+	}
+
+	if len(explain[exitEvent].Locals) != 1 {
+		t.Fatalf("Expected one binding but got: %v", explain[exitEvent].Locals)
 	}
 
 	req = newReqV1(http.MethodGet, "/data/deadbeef?explain=full", "")
@@ -2067,12 +2420,14 @@ func TestDataGetExplainFull(t *testing.T) {
 	}
 
 	explain = mustUnmarshalTrace(result.Explanation)
-	if len(explain) != 3 {
-		t.Fatalf("Expected exactly 3 events but got %d", len(explain))
+	nexpect = 3
+	if len(explain) != nexpect {
+		t.Fatalf("Expected exactly %d events but got %d", nexpect, len(explain))
 	}
 
-	if explain[2].Op != "fail" {
-		t.Fatalf("Expected last event to be 'fail' but got: %v", explain[2])
+	lastEvent := len(explain) - 1
+	if explain[lastEvent].Op != "fail" {
+		t.Fatalf("Expected last event to be 'fail' but got: %v", explain[lastEvent])
 	}
 
 	req = newReqV1(http.MethodGet, "/data/x?explain=full&pretty=true", "")
@@ -3184,7 +3539,7 @@ func TestDecisionLogging(t *testing.T) {
 			code:   404,
 			response: `{
 				"code": "undefined_document",
-				"message": "document missing or undefined: data.test"
+				"message": "document missing: data.test"
 			  }`,
 		},
 	}
@@ -3392,6 +3747,15 @@ func TestUnversionedPost(t *testing.T) {
 		t.Fatalf("Expected not found before policy added but got %v", f.recorder)
 	}
 
+	expectedBody := `{
+  "code": "undefined_document",
+  "message": "document missing: data.system.main"
+}
+`
+	if f.recorder.Body.String() != expectedBody {
+		t.Errorf("Expected %s got %s", expectedBody, f.recorder.Body.String())
+	}
+
 	module := `
 	package system.main
 
@@ -3407,15 +3771,45 @@ func TestUnversionedPost(t *testing.T) {
 	f.reset()
 	f.server.Handler.ServeHTTP(f.recorder, post())
 
-	expected := `{"agg":6}`
+	expected := "{\"agg\":6}\n"
 	if f.recorder.Code != 200 || f.recorder.Body.String() != expected {
 		t.Fatalf(`Expected HTTP 200 / %v but got: %v`, expected, f.recorder)
+	}
+
+	module = `
+	package system
+
+	main {
+		input.foo == "bar"
+	}
+	`
+
+	if err := f.v1("PUT", "/policies/test", module, 200, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, func() *http.Request {
+		return newReqUnversioned(http.MethodPost, "/", `{"input": {"foo": "bar"}}`)
+	}())
+
+	if f.recorder.Code != 404 {
+		t.Fatalf("Expected not found before policy added but got %v", f.recorder)
+	}
+
+	expectedBody = `{
+  "code": "undefined_document",
+  "message": "document undefined: data.system.main"
+}
+`
+	if f.recorder.Body.String() != expectedBody {
+		t.Errorf("Expected %s got %s", expectedBody, f.recorder.Body.String())
 	}
 }
 
 func TestQueryV1Explain(t *testing.T) {
 	f := newFixture(t)
-	get := newReqV1(http.MethodGet, `/query?q=a=[1,2,3]%3Ba[i]=x&explain=full`, "")
+	get := newReqV1(http.MethodGet, `/query?q=a=[1,2,3]%3Ba[i]=x&explain=debug`, "")
 	f.server.Handler.ServeHTTP(f.recorder, get)
 
 	if f.recorder.Code != 200 {
@@ -3428,9 +3822,10 @@ func TestQueryV1Explain(t *testing.T) {
 		t.Fatalf("Unexpected JSON decode error: %v", err)
 	}
 
+	nexpect := 21
 	explain := mustUnmarshalTrace(result.Explanation)
-	if len(explain) != 13 {
-		t.Fatalf("Expected exactly 10 trace events for full query but got %d", len(explain))
+	if len(explain) != nexpect {
+		t.Fatalf("Expected exactly %d trace events for full query but got %d", nexpect, len(explain))
 	}
 }
 
@@ -3871,6 +4266,36 @@ func newFixture(t *testing.T, opts ...func(*Server)) *fixture {
 	}
 }
 
+func newFixtureWithConfig(t *testing.T, config string, opts ...func(*Server)) *fixture {
+	ctx := context.Background()
+	server := New().
+		WithAddresses([]string{"localhost:8182"}).
+		WithStore(inmem.New()) // potentially overridden via opts
+	for _, opt := range opts {
+		opt(server)
+	}
+
+	m, err := plugins.New([]byte(config), "test", server.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server = server.WithManager(m)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	server, err = server.Init(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+
+	return &fixture{
+		server:   server,
+		recorder: recorder,
+		t:        t,
+	}
+}
+
 func newFixtureWithStore(t *testing.T, store storage.Store, opts ...func(*Server)) *fixture {
 	ctx := context.Background()
 	m, err := plugins.New([]byte{}, "test", store)
@@ -4036,6 +4461,26 @@ func newReq(version int, method, path, body string) *http.Request {
 
 func newReqUnversioned(method, path, body string) *http.Request {
 	req, err := http.NewRequest(method, path, strings.NewReader(body))
+	if err != nil {
+		panic(err)
+	}
+	return req
+}
+
+func newStreamedReqV0(method string, path string, body io.Reader) *http.Request {
+	return newStreamedReq(0, method, path, body)
+}
+
+func newStreamedReqV1(method string, path string, body io.Reader) *http.Request {
+	return newStreamedReq(1, method, path, body)
+}
+
+func newStreamedReq(version int, method string, path string, body io.Reader) *http.Request {
+	return newStreamedReqUnversioned(method, fmt.Sprintf("/v%d", version)+path, body)
+}
+
+func newStreamedReqUnversioned(method string, path string, body io.Reader) *http.Request {
+	req, err := http.NewRequest(method, path, body)
 	if err != nil {
 		panic(err)
 	}
@@ -4350,11 +4795,14 @@ func TestDistributedTracingEnabled(t *testing.T) {
 		}}`)
 
 	ctx := context.Background()
-	_, traceOpts, err := distributedtracing.Init(ctx, c, "foo")
+	_, tracerProvider, err := distributedtracing.Init(ctx, c, "foo")
 	if err != nil {
 		t.Fatalf("Unexpected error initializing trace exporter %v", err)
 	}
-
+	traceOpts := tracing.NewOptions(
+		otelhttp.WithTracerProvider(tracerProvider),
+		otelhttp.WithPropagators(propagation.TraceContext{}),
+	)
 	s := New()
 	s.WithDistributedTracingOpts(traceOpts)
 	handler := s.instrumentHandler(writer.HTTPStatus(405), "test")
@@ -4419,4 +4867,16 @@ func (m mockHTTPListener) Shutdown(context.Context) error {
 
 func (m mockHTTPListener) Type() httpListenerType {
 	return m.t
+}
+
+func zipString(input string) []byte {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	if _, err := gz.Write([]byte(input)); err != nil {
+		log.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		log.Fatal(err)
+	}
+	return b.Bytes()
 }

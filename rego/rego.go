@@ -119,6 +119,7 @@ type EvalContext struct {
 	ndBuiltinCache         builtins.NDBCache
 	resolvers              []refResolver
 	sortSets               bool
+	copyMaps               bool
 	printHook              print.Hook
 	capabilities           *ast.Capabilities
 }
@@ -274,6 +275,13 @@ func EvalResolver(ref ast.Ref, r resolver.Resolver) EvalOption {
 func EvalSortSets(yes bool) EvalOption {
 	return func(e *EvalContext) {
 		e.sortSets = yes
+	}
+}
+
+// EvalCopyMaps causes the evaluator to copy `map[string]interface{}`s before returning them.
+func EvalCopyMaps(yes bool) EvalOption {
+	return func(e *EvalContext) {
+		e.copyMaps = yes
 	}
 }
 
@@ -520,6 +528,7 @@ type Rego struct {
 	interQueryBuiltinCache cache.InterQueryCache
 	ndBuiltinCache         builtins.NDBCache
 	strictBuiltinErrors    bool
+	builtinErrorList       *[]topdown.Error
 	resolvers              []refResolver
 	schemaSet              *ast.SchemaSet
 	target                 string // target type (wasm, rego, etc.)
@@ -528,6 +537,7 @@ type Rego struct {
 	printHook              print.Hook
 	enablePrintStatements  bool
 	distributedTacingOpts  tracing.Options
+	strict                 bool
 }
 
 // Function represents a built-in function that is callable in Rego.
@@ -1046,6 +1056,13 @@ func StrictBuiltinErrors(yes bool) func(r *Rego) {
 	}
 }
 
+// BuiltinErrorList supplies an error slice to store built-in function errors.
+func BuiltinErrorList(list *[]topdown.Error) func(r *Rego) {
+	return func(r *Rego) {
+		r.builtinErrorList = list
+	}
+}
+
 // Resolver sets a Resolver for a specified ref path.
 func Resolver(ref ast.Ref, r resolver.Resolver) func(r *Rego) {
 	return func(rego *Rego) {
@@ -1107,6 +1124,13 @@ func EnablePrintStatements(yes bool) func(r *Rego) {
 	}
 }
 
+// Strict enables or disables strict-mode in the compiler
+func Strict(yes bool) func(r *Rego) {
+	return func(r *Rego) {
+		r.strict = yes
+	}
+}
+
 // New returns a new Rego object.
 func New(options ...func(r *Rego)) *Rego {
 
@@ -1130,7 +1154,9 @@ func New(options ...func(r *Rego)) *Rego {
 			WithDebug(r.dump).
 			WithSchemas(r.schemaSet).
 			WithCapabilities(r.capabilities).
-			WithEnablePrintStatements(r.enablePrintStatements)
+			WithEnablePrintStatements(r.enablePrintStatements).
+			WithStrict(r.strict).
+			WithUseTypeCheckAnnotations(true)
 	}
 
 	if r.store == nil {
@@ -1186,8 +1212,11 @@ func (r *Rego) Eval(ctx context.Context) (ResultSet, error) {
 		EvalInstrument(r.instrument),
 		EvalTime(r.time),
 		EvalInterQueryBuiltinCache(r.interQueryBuiltinCache),
-		EvalNDBuiltinCache(r.ndBuiltinCache),
 		EvalSeed(r.seed),
+	}
+
+	if r.ndBuiltinCache != nil {
+		evalArgs = append(evalArgs, EvalNDBuiltinCache(r.ndBuiltinCache))
 	}
 
 	for _, qt := range r.queryTracers {
@@ -1260,7 +1289,10 @@ func (r *Rego) Partial(ctx context.Context) (*PartialQueries, error) {
 		EvalMetrics(r.metrics),
 		EvalInstrument(r.instrument),
 		EvalInterQueryBuiltinCache(r.interQueryBuiltinCache),
-		EvalNDBuiltinCache(r.ndBuiltinCache),
+	}
+
+	if r.ndBuiltinCache != nil {
+		evalArgs = append(evalArgs, EvalNDBuiltinCache(r.ndBuiltinCache))
 	}
 
 	for _, t := range r.queryTracers {
@@ -1305,7 +1337,7 @@ func (r *Rego) Compile(ctx context.Context, opts ...CompileOption) (*CompileResu
 	}
 
 	var queries []ast.Body
-	var modules []*ast.Module
+	modules := make([]*ast.Module, 0, len(r.compiler.Modules))
 
 	if cfg.partial {
 
@@ -1657,7 +1689,14 @@ func (r *Rego) prepare(ctx context.Context, qType queryType, extras []extraStage
 }
 
 func (r *Rego) parseModules(ctx context.Context, txn storage.Transaction, m metrics.Metrics) error {
-	if len(r.modules) == 0 {
+	ids, err := r.store.ListPolicies(ctx, txn)
+	if err != nil {
+		return err
+	}
+
+	// if there are no raw modules, nor modules in the store, then there
+	// is nothing to do.
+	if len(r.modules) == 0 && len(ids) == 0 {
 		return nil
 	}
 
@@ -1668,11 +1707,6 @@ func (r *Rego) parseModules(ctx context.Context, txn storage.Transaction, m metr
 	// Parse any modules in the are saved to the store, but only if
 	// another compile step is going to occur (ie. we have parsed modules
 	// that need to be compiled).
-	ids, err := r.store.ListPolicies(ctx, txn)
-	if err != nil {
-		return err
-	}
-
 	for _, id := range ids {
 		// if it is already on the compiler we're using
 		// then don't bother to re-parse it from source
@@ -1719,7 +1753,7 @@ func (r *Rego) loadFiles(ctx context.Context, txn storage.Transaction, m metrics
 
 	result, err := loader.NewFileLoader().
 		WithMetrics(m).
-		WithProcessAnnotation(r.schemaSet != nil).
+		WithProcessAnnotation(true).
 		Filtered(r.loadPaths.paths, r.loadPaths.filter)
 	if err != nil {
 		return err
@@ -1748,7 +1782,7 @@ func (r *Rego) loadBundles(ctx context.Context, txn storage.Transaction, m metri
 	for _, path := range r.bundlePaths {
 		bndl, err := loader.NewFileLoader().
 			WithMetrics(m).
-			WithProcessAnnotation(r.schemaSet != nil).
+			WithProcessAnnotation(true).
 			WithSkipBundleVerification(r.skipBundleVerification).
 			AsBundle(path)
 		if err != nil {
@@ -1904,7 +1938,8 @@ func (r *Rego) compileQuery(query ast.Body, imports []*ast.Import, m metrics.Met
 	qc := r.compiler.QueryCompiler().
 		WithContext(qctx).
 		WithUnsafeBuiltins(r.unsafeBuiltins).
-		WithEnablePrintStatements(r.enablePrintStatements)
+		WithEnablePrintStatements(r.enablePrintStatements).
+		WithStrict(false)
 
 	for _, extra := range extras {
 		qc = qc.WithStageAfter(extra.after, extra.stage)
@@ -1933,14 +1968,18 @@ func (r *Rego) eval(ctx context.Context, ectx *EvalContext) (ResultSet, error) {
 		WithIndexing(ectx.indexing).
 		WithEarlyExit(ectx.earlyExit).
 		WithInterQueryBuiltinCache(ectx.interQueryBuiltinCache).
-		WithNDBuiltinCache(ectx.ndBuiltinCache).
 		WithStrictBuiltinErrors(r.strictBuiltinErrors).
+		WithBuiltinErrorList(r.builtinErrorList).
 		WithSeed(ectx.seed).
 		WithPrintHook(ectx.printHook).
 		WithDistributedTracingOpts(r.distributedTacingOpts)
 
 	if !ectx.time.IsZero() {
 		q = q.WithTime(ectx.time)
+	}
+
+	if ectx.ndBuiltinCache != nil {
+		q = q.WithNDBuiltinCache(ectx.ndBuiltinCache)
 	}
 
 	for i := range ectx.queryTracers {
@@ -2212,13 +2251,16 @@ func (r *Rego) partial(ctx context.Context, ectx *EvalContext) (*PartialQueries,
 		WithSkipPartialNamespace(r.skipPartialNamespace).
 		WithShallowInlining(r.shallowInlining).
 		WithInterQueryBuiltinCache(ectx.interQueryBuiltinCache).
-		WithNDBuiltinCache(ectx.ndBuiltinCache).
 		WithStrictBuiltinErrors(r.strictBuiltinErrors).
 		WithSeed(ectx.seed).
 		WithPrintHook(ectx.printHook)
 
 	if !ectx.time.IsZero() {
 		q = q.WithTime(ectx.time)
+	}
+
+	if ectx.ndBuiltinCache != nil {
+		q = q.WithNDBuiltinCache(ectx.ndBuiltinCache)
 	}
 
 	for i := range ectx.queryTracers {
@@ -2564,5 +2606,9 @@ func newFunction(decl *Function, f topdown.BuiltinFunc) func(*Rego) {
 }
 
 func generateJSON(term *ast.Term, ectx *EvalContext) (interface{}, error) {
-	return ast.JSONWithOpt(term.Value, ast.JSONOpt{SortSets: ectx.sortSets})
+	return ast.JSONWithOpt(term.Value,
+		ast.JSONOpt{
+			SortSets: ectx.sortSets,
+			CopyMaps: ectx.copyMaps,
+		})
 }

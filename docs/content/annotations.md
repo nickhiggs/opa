@@ -12,6 +12,7 @@ The package and individual rules in a module can be annotated with a rich set of
 # description: A rule that determines if x is allowed.
 # authors:
 # - John Doe <john@example.com>
+# entrypoint: true
 allow {
   ...
 }
@@ -34,12 +35,13 @@ comment block containing the YAML document is finished
 Name | Type | Description
 --- | --- | ---
 scope | string; one of `package`, `rule`, `document`, `subpackages` | The scope on which the `schemas` annotation is applied. Read more [here](./#scope).
-title | string | A human-redable name for the annotation target. Read more [here](#title).
+title | string | A human-readable name for the annotation target. Read more [here](#title).
 description | string | A description of the annotation target. Read more [here](#description).
 related_resources | list of URLs | A list of URLs pointing to related resources/documentation. Read more [here](#related-resources).
 authors | list of strings | A list of authors for the annotation target. Read more [here](#authors).
 organizations | list of strings | A list of organizations related to the annotation target. Read more [here](#organizations).
 schemas | list of object | A list of associations between value paths and schema definitions. Read more [here](#schemas).
+entrypoint | boolean | Whether or not the annotation target is to be used as a policy entrypoint. Read more [here](#entrypoint).
 custom | mapping of arbitrary data | A custom mapping of named parameters holding arbitrary data. Read more [here](#custom).
 
 ### Scope
@@ -52,13 +54,13 @@ supported are:
 
 * `rule` - applies to the individual rule statement (within the same file). Default, when metadata block precedes rule.
 * `document` - applies to all of the rules with the same name in the same package (across multiple files)
-* `package` - applies to all of the rules in the package (within the same file). Default, when metadata block precedes package.
+* `package` - applies to all of the rules in the package (across multiple files). Default, when metadata block precedes package.
 * `subpackages` - applies to all of the rules in the package and all subpackages (recursively, across multiple files)
 
 Since the `document` scope annotation applies to all rules with the same name in the same package 
-and the `subpackages` scope annotation applies to all packages with a matching path, metadata blocks with 
+and the `package` and `subpackages` scope annotations apply to all packages with a matching path, metadata blocks with 
 these scopes are applied over all files with applicable package- and rule paths. 
-As there is no ordering across files in the same package, the `document` and `subpackages` scope annotations 
+As there is no ordering across files in the same package, the `document`, `package`, and `subpackages` scope annotations 
 can only be specified **once** per path. 
 The `document` scope annotation can be applied to any rule in the set (i.e., ordering does not matter.)
 
@@ -223,9 +225,13 @@ allow {
 The `schemas` annotation is a list of key value pairs, associating schemas to data values.
 In-depth information on this topic can be found [here](../schemas#schema-annotations).
 
-#### Example
+#### Schema Reference Format
 
-```live:rego/metadata/schemas:module:read_only
+Schema files can be referenced by path, where each path starts with the `schema` namespace, and trailing components specify 
+the path of the schema file (sans file-ending) relative to the root directory specified by the `--schema` flag on applicable commands.
+If the `--schema` flag is not present, referenced schemas are ignored during type checking.
+
+```live:rego/metadata/schemas_ref:module:read_only
 # METADATA
 # schemas:
 #   - input: schema.input
@@ -235,6 +241,35 @@ allow {
     access[_] == input.operation
 }
 ```
+
+#### Inlined Schema Format
+
+Schema definitions can be inlined by specifying the schema structure as a YAML or JSON map.
+Inlined schemas are always used to inform type checking for the `eval`, `check`, and `test` commands; 
+in contrast to [by-reference schema annotations](#schema-reference-format), which require the `--schema` flag to be present in order to be evaluated.
+
+```live:rego/metadata/schemas_inline:module:read_only
+# METADATA
+# schemas:
+#   - input.x: {type: number}
+allow {
+    input.x == 42
+}
+```
+
+### Entrypoint
+
+The `entrypoint` annotation is a boolean used to mark rules and packages that should be used as entrypoints for a policy.
+This value is false by default, and can only be used at `rule` or `package` scope.
+
+The `build` and `eval` CLI commands will automatically pick up annotated entrypoints; you do not have to specify them with
+[`--entrypoint`](../cli/#options-1).
+
+{{< info >}}
+Unless the `--prune-unused` flag is used, any rule transitively referring to a
+package or rule declared as an entrypoint will also be enumerated as an entrypoint.
+{{< /info >}}
+
 
 ### Custom
 

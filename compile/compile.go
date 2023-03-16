@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -57,26 +58,27 @@ const resultVar = ast.Var("result")
 
 // Compiler implements bundle compilation and linking.
 type Compiler struct {
-	capabilities          *ast.Capabilities          // the capabilities that compiled policies may require
-	bundle                *bundle.Bundle             // the bundle that the compiler operates on
-	revision              *string                    // the revision to set on the output bundle
-	asBundle              bool                       // whether to assume bundle layout on file loading or not
-	pruneUnused           bool                       // whether to extend the entrypoint set for semantic equivalence of built bundles
-	filter                loader.Filter              // filter to apply to file loader
-	paths                 []string                   // file paths to load. TODO(tsandall): add support for supplying readers for embedded users.
-	entrypoints           orderedStringSet           // policy entrypoints required for optimization and certain targets
-	optimizationLevel     int                        // how aggressive should optimization be
-	target                string                     // target type (wasm, rego, etc.)
-	output                *io.Writer                 // output stream to write bundle to
-	entrypointrefs        []*ast.Term                // validated entrypoints computed from default decision or manually supplied entrypoints
-	compiler              *ast.Compiler              // rego ast compiler used for semantic checks and rewriting
-	policy                *ir.Policy                 // planner output when wasm or plan targets are enabled
-	debug                 debug.Debug                // optionally outputs debug information produced during build
-	enablePrintStatements bool                       // optionally enable rego print statements
-	bvc                   *bundle.VerificationConfig // represents the key configuration used to verify a signed bundle
-	bsc                   *bundle.SigningConfig      // represents the key configuration used to generate a signed bundle
-	keyID                 string                     // represents the name of the default key used to verify a signed bundle
-	metadata              *map[string]interface{}    // represents additional data included in .manifest file
+	capabilities                 *ast.Capabilities          // the capabilities that compiled policies may require
+	bundle                       *bundle.Bundle             // the bundle that the compiler operates on
+	revision                     *string                    // the revision to set on the output bundle
+	asBundle                     bool                       // whether to assume bundle layout on file loading or not
+	pruneUnused                  bool                       // whether to extend the entrypoint set for semantic equivalence of built bundles
+	filter                       loader.Filter              // filter to apply to file loader
+	paths                        []string                   // file paths to load. TODO(tsandall): add support for supplying readers for embedded users.
+	entrypoints                  orderedStringSet           // policy entrypoints required for optimization and certain targets
+	useRegoAnnotationEntrypoints bool                       // allow compiler to late-bind entrypoints from annotated rules in policies.
+	optimizationLevel            int                        // how aggressive should optimization be
+	target                       string                     // target type (wasm, rego, etc.)
+	output                       *io.Writer                 // output stream to write bundle to
+	entrypointrefs               []*ast.Term                // validated entrypoints computed from default decision or manually supplied entrypoints
+	compiler                     *ast.Compiler              // rego ast compiler used for semantic checks and rewriting
+	policy                       *ir.Policy                 // planner output when wasm or plan targets are enabled
+	debug                        debug.Debug                // optionally outputs debug information produced during build
+	enablePrintStatements        bool                       // optionally enable rego print statements
+	bvc                          *bundle.VerificationConfig // represents the key configuration used to verify a signed bundle
+	bsc                          *bundle.SigningConfig      // represents the key configuration used to generate a signed bundle
+	keyID                        string                     // represents the name of the default key used to verify a signed bundle
+	metadata                     *map[string]interface{}    // represents additional data included in .manifest file
 }
 
 // New returns a new compiler instance that can be invoked.
@@ -120,6 +122,14 @@ func (c *Compiler) WithPruneUnused(enabled bool) *Compiler {
 // target requires at least one entrypoint as does optimization.
 func (c *Compiler) WithEntrypoints(e ...string) *Compiler {
 	c.entrypoints = c.entrypoints.Append(e...)
+	return c
+}
+
+// WithRegoAnnotationEntrypoints allows the compiler to late-bind entrypoints, based
+// on Rego entrypoint annotations. The rules tagged with entrypoint annotations are
+// added to the global list of entrypoints before optimizations/target compilation.
+func (c *Compiler) WithRegoAnnotationEntrypoints(enabled bool) *Compiler {
+	c.useRegoAnnotationEntrypoints = enabled
 	return c
 }
 
@@ -210,6 +220,42 @@ func (c *Compiler) WithMetadata(metadata *map[string]interface{}) *Compiler {
 	return c
 }
 
+func addEntrypointsFromAnnotations(c *Compiler, ar []*ast.AnnotationsRef) error {
+	for _, ref := range ar {
+		var entrypoint ast.Ref
+		scope := ref.Annotations.Scope
+
+		if ref.Annotations.Entrypoint {
+			// Build up the entrypoint path from either package path or rule.
+			switch scope {
+			case "package":
+				if p := ref.GetPackage(); p != nil {
+					entrypoint = p.Path
+				}
+			case "rule":
+				if r := ref.GetRule(); r != nil {
+					entrypoint = r.Ref().GroundPrefix()
+				}
+			default:
+				continue // Wrong scope type. Bail out early.
+			}
+
+			// Get a slash-based path, as with a CLI-provided entrypoint.
+			escapedPath, err := storage.NewPathForRef(entrypoint)
+			if err != nil {
+				return err
+			}
+			slashPath := strings.Join(escapedPath, "/")
+
+			// Add new entrypoints to the appropriate places.
+			c.entrypoints = c.entrypoints.Append(slashPath)
+			c.entrypointrefs = append(c.entrypointrefs, ast.NewTerm(entrypoint))
+		}
+	}
+
+	return nil
+}
+
 // Build compiles and links the input files and outputs a bundle to the writer.
 func (c *Compiler) Build(ctx context.Context) error {
 
@@ -217,7 +263,38 @@ func (c *Compiler) Build(ctx context.Context) error {
 		return err
 	}
 
+	// Fail early if not using Rego annotation entrypoints.
+	if !c.useRegoAnnotationEntrypoints {
+		if err := c.checkNumEntrypoints(); err != nil {
+			return err
+		}
+	}
+
 	if err := c.initBundle(); err != nil {
+		return err
+	}
+
+	// Extract annotations, and generate new entrypoints as needed.
+	if c.useRegoAnnotationEntrypoints {
+		moduleList := make([]*ast.Module, 0, len(c.bundle.Modules))
+		for _, modfile := range c.bundle.Modules {
+			moduleList = append(moduleList, modfile.Parsed)
+		}
+		as, errs := ast.BuildAnnotationSet(moduleList)
+		if len(errs) > 0 {
+			return errs
+		}
+		ar := as.Flatten()
+
+		// Patch in entrypoints from Rego annotations.
+		err := addEntrypointsFromAnnotations(c, ar)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Ensure we have at least one valid entrypoint, or fail before compilation.
+	if err := c.checkNumEntrypoints(); err != nil {
 		return err
 	}
 
@@ -293,7 +370,6 @@ func (c *Compiler) init() error {
 	}
 
 	for _, e := range c.entrypoints {
-
 		r, err := ref.ParseDataPath(e)
 		if err != nil {
 			return fmt.Errorf("entrypoint %v not valid: use <package>/<rule>", e)
@@ -302,19 +378,18 @@ func (c *Compiler) init() error {
 		c.entrypointrefs = append(c.entrypointrefs, ast.NewTerm(r))
 	}
 
+	return nil
+}
+
+// Once the bundle has been loaded, we can check the entrypoint counts.
+func (c *Compiler) checkNumEntrypoints() error {
 	if c.optimizationLevel > 0 && len(c.entrypointrefs) == 0 {
 		return errors.New("bundle optimizations require at least one entrypoint")
 	}
 
-	switch c.target {
-	case TargetWasm:
-		if len(c.entrypointrefs) == 0 {
-			return errors.New("wasm compilation requires at least one entrypoint")
-		}
-	case TargetPlan:
-		if len(c.entrypointrefs) == 0 {
-			return errors.New("plan compilation requires at least one entrypoint")
-		}
+	// Rego target does not require an entrypoint. Others currently do.
+	if c.target != TargetRego && len(c.entrypointrefs) == 0 {
+		return fmt.Errorf("%s compilation requires at least one entrypoint", c.target)
 	}
 
 	return nil
@@ -327,7 +402,6 @@ func (c *Compiler) Bundle() *bundle.Bundle {
 }
 
 func (c *Compiler) initBundle() error {
-
 	// If the bundle is already set, skip file loading.
 	if c.bundle != nil {
 		return nil
@@ -336,7 +410,7 @@ func (c *Compiler) initBundle() error {
 	// TODO(tsandall): the metrics object should passed through here so we that
 	// we can track read and parse times.
 
-	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false)
+	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false, c.useRegoAnnotationEntrypoints, c.capabilities)
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
@@ -373,7 +447,6 @@ func (c *Compiler) initBundle() error {
 	result.Data = load.Files.Documents
 
 	modules := make([]string, 0, len(load.Files.Modules))
-
 	for k := range load.Files.Modules {
 		modules = append(modules, k)
 	}
@@ -381,9 +454,10 @@ func (c *Compiler) initBundle() error {
 	sort.Strings(modules)
 
 	for _, module := range modules {
+		path := filepath.ToSlash(load.Files.Modules[module].Name)
 		result.Modules = append(result.Modules, bundle.ModuleFile{
-			URL:    load.Files.Modules[module].Name,
-			Path:   load.Files.Modules[module].Name,
+			URL:    path,
+			Path:   path,
 			Parsed: load.Files.Modules[module].Parsed,
 			Raw:    load.Files.Modules[module].Raw,
 		})
@@ -467,7 +541,6 @@ func (c *Compiler) compilePlan(context.Context) error {
 	var unmappedEntrypoints []string
 
 	for i := range c.entrypointrefs {
-
 		qc := c.compiler.QueryCompiler()
 		query := ast.NewBody(ast.Equality.Expr(resultSym, c.entrypointrefs[i]))
 		compiled, err := qc.Compile(query)
@@ -488,11 +561,10 @@ func (c *Compiler) compilePlan(context.Context) error {
 
 	if len(unmappedEntrypoints) > 0 {
 		return fmt.Errorf("entrypoint %q does not refer to a rule or policy decision", unmappedEntrypoints[0])
-
 	}
 
 	// Prepare modules and builtins for the planner.
-	modules := []*ast.Module{}
+	modules := make([]*ast.Module, 0, len(c.compiler.Modules))
 	for _, module := range c.compiler.Modules {
 		modules = append(modules, module)
 	}
@@ -570,18 +642,53 @@ func (c *Compiler) compileWasm(ctx context.Context) error {
 		Raw:  buf.Bytes(),
 	}}
 
+	flattenedAnnotations := c.compiler.GetAnnotationSet().Flatten()
+
 	// Each entrypoint needs an entry in the manifest
-	for i := range c.entrypointrefs {
+	for i, e := range c.entrypointrefs {
 		entrypointPath := c.entrypoints[i]
 
+		var annotations []*ast.Annotations
+		if !c.isPackage(e) {
+			annotations = findAnnotationsForTerm(e, flattenedAnnotations)
+		}
+
 		c.bundle.Manifest.WasmResolvers = append(c.bundle.Manifest.WasmResolvers, bundle.WasmResolver{
-			Module:     "/" + strings.TrimLeft(modulePath, "/"),
-			Entrypoint: entrypointPath,
+			Module:      "/" + strings.TrimLeft(modulePath, "/"),
+			Entrypoint:  entrypointPath,
+			Annotations: annotations,
 		})
 	}
 
 	// Remove the entrypoints from remaining source rego files
 	return pruneBundleEntrypoints(c.bundle, c.entrypointrefs)
+}
+
+func (c *Compiler) isPackage(term *ast.Term) bool {
+	for _, m := range c.compiler.Modules {
+		if m.Package.Path.Equal(term.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+// findAnnotationsForTerm returns a slice of all annotations directly associated with the given term.
+func findAnnotationsForTerm(term *ast.Term, annotationRefs []*ast.AnnotationsRef) []*ast.Annotations {
+	r, ok := term.Value.(ast.Ref)
+	if !ok {
+		return nil
+	}
+
+	var result []*ast.Annotations
+
+	for _, ar := range annotationRefs {
+		if r.Equal(ar.Path) {
+			result = append(result, ar.Annotations)
+		}
+	}
+
+	return result
 }
 
 // pruneBundleEntrypoints will modify modules in the provided bundle to remove
@@ -619,11 +726,43 @@ func pruneBundleEntrypoints(b *bundle.Bundle, entrypointrefs []*ast.Term) error 
 				}
 			}
 
-			// If any rules were dropped update the module accordingly
-			if len(rules) != len(mf.Parsed.Rules) {
+			// Drop any Annotations for rules matching the entrypoint path
+			var annotations []*ast.Annotations
+			var prunedAnnotations []*ast.Annotations
+			for _, annotation := range mf.Parsed.Annotations {
+				p := annotation.GetTargetPath()
+				// We prune annotations of dropped rules, but not packages, as the Rego file is always retained
+				if p.Equal(entrypoint.Value) && !mf.Parsed.Package.Path.Equal(entrypoint.Value) {
+					prunedAnnotations = append(prunedAnnotations, annotation)
+				} else {
+					annotations = append(annotations, annotation)
+				}
+			}
+
+			// Drop comments associated with pruned annotations
+			var comments []*ast.Comment
+			for _, comment := range mf.Parsed.Comments {
+				pruned := false
+				for _, annotation := range prunedAnnotations {
+					if comment.Location.Row >= annotation.Location.Row &&
+						comment.Location.Row <= annotation.EndLoc().Row {
+						pruned = true
+						break
+					}
+				}
+
+				if !pruned {
+					comments = append(comments, comment)
+				}
+			}
+
+			// If any rules or annotations were dropped update the module accordingly
+			if len(rules) != len(mf.Parsed.Rules) || len(comments) != len(mf.Parsed.Comments) {
 				mf.Parsed.Rules = rules
+				mf.Parsed.Annotations = annotations
+				mf.Parsed.Comments = comments
 				// Remove the original raw source, we're editing the AST
-				// directly so it wont be in sync anymore.
+				// directly, so it won't be in sync anymore.
 				mf.Raw = nil
 			}
 		}
@@ -887,7 +1026,7 @@ func (o *optimizer) getSupportForEntrypoint(queries []ast.Body, e *ast.Term, res
 			o.debug.Printf("optimizer: entrypoint: %v: discard due to self-reference", e)
 			return nil
 		}
-		module.Rules = append(module.Rules, &ast.Rule{
+		module.Rules = append(module.Rules, &ast.Rule{ // TODO(sr): use RefHead instead?
 			Head:   ast.NewHead(name, nil, resultsym),
 			Body:   query,
 			Module: module,
@@ -900,6 +1039,8 @@ func (o *optimizer) getSupportForEntrypoint(queries []ast.Body, e *ast.Term, res
 // merge combines two sets of modules and returns the result. The rules from modules
 // in 'b' override rules from modules in 'a'. If all rules in a module in 'a' are overridden
 // by rules in modules in 'b' then the module from 'a' is discarded.
+// NOTE(sr): This function assumes that `b` is the result of partial eval, and thus does NOT
+// contain any rules that genuinely need their ref heads.
 func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 
 	prefixes := ast.NewSet()
@@ -911,12 +1052,19 @@ func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 		// of rules.)
 		seen := ast.NewVarSet()
 		for _, rule := range b[i].Parsed.Rules {
-			if _, ok := seen[rule.Head.Name]; !ok {
-				prefixes.Add(ast.NewTerm(rule.Path()))
-				seen.Add(rule.Head.Name)
+			// NOTE(sr): we're relying on the fact that PE never emits ref rules (so far)!
+			// The rule
+			//   p.a = 1 { ... }
+			// will be recorded in prefixes as `data.test.p`, and that'll be checked later on against `data.test.p[k]`
+			if len(rule.Head.Ref()) > 2 {
+				panic("expected a module without ref rules")
+			}
+			name := rule.Head.Name
+			if !seen.Contains(name) {
+				prefixes.Add(ast.NewTerm(b[i].Parsed.Package.Path.Append(ast.StringTerm(string(name)))))
+				seen.Add(name)
 			}
 		}
-
 	}
 
 	for i := range a {
@@ -925,30 +1073,28 @@ func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 
 		// NOTE(tsandall): same as above--memoize keep/discard decision. If multiple
 		// entrypoints are provided the dst module may contain a large number of rules.
-		seen := ast.NewVarSet()
-		discard := ast.NewVarSet()
-
+		seen, discarded := ast.NewSet(), ast.NewSet()
 		for _, rule := range a[i].Parsed.Rules {
-
-			if _, ok := discard[rule.Head.Name]; ok {
-				continue
-			} else if _, ok := seen[rule.Head.Name]; ok {
+			refT := ast.NewTerm(rule.Ref())
+			switch {
+			case seen.Contains(refT):
 				keep = append(keep, rule)
+				continue
+			case discarded.Contains(refT):
 				continue
 			}
 
-			path := rule.Path()
+			path := rule.Ref()
 			overlap := prefixes.Until(func(x *ast.Term) bool {
-				ref := x.Value.(ast.Ref)
-				return path.HasPrefix(ref)
+				r := x.Value.(ast.Ref)
+				return path.HasPrefix(r)
 			})
-
 			if overlap {
-				discard.Add(rule.Head.Name)
-			} else {
-				seen.Add(rule.Head.Name)
-				keep = append(keep, rule)
+				discarded.Add(refT)
+				continue
 			}
+			seen.Add(refT)
+			keep = append(keep, rule)
 		}
 
 		if len(keep) > 0 {
@@ -956,7 +1102,6 @@ func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 			a[i].Raw = nil
 			b = append(b, a[i])
 		}
-
 	}
 
 	return b

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,13 +141,13 @@ func (s *Server) buildBundles(ref string, policies map[string]string) error {
 	}
 	// Write buf tarball to layer
 	tarLayer := filepath.Join(directoryName, "tar.layer")
-	err = ioutil.WriteFile(tarLayer, buf.Bytes(), 0655)
+	err = os.WriteFile(tarLayer, buf.Bytes(), 0655)
 	if err != nil {
 		return err
 	}
 	// Write empty config layer
 	configLayer := filepath.Join(directoryName, "config.layer")
-	err = ioutil.WriteFile(configLayer, []byte("{}"), 0655)
+	err = os.WriteFile(configLayer, []byte("{}"), 0655)
 	if err != nil {
 		return err
 	}
@@ -187,7 +186,7 @@ func (s *Server) buildBundles(ref string, policies map[string]string) error {
 		return err
 	}
 	manifestLayer := filepath.Join(directoryName, "manifest.layer")
-	err = ioutil.WriteFile(manifestLayer, manifestData, 0655)
+	err = os.WriteFile(manifestLayer, manifestData, 0655)
 	if err != nil {
 		return err
 	}
@@ -306,7 +305,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", manifestSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["manifest"])
+		bs, err := os.ReadFile(layers["manifest"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -323,7 +322,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", configSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["config"])
+		bs, err := os.ReadFile(layers["config"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -340,7 +339,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", tarSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["tar"])
+		bs, err := os.ReadFile(layers["tar"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -363,19 +362,58 @@ func (s *Server) handleBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prepare a mapping to store bundle data
+	data := map[string]interface{}{}
+
+	// Prepare a manifest for use if a .manifest file exists.
+	var manifest bundle.Manifest
+
 	// Prepare the modules to include in the bundle. Sort them so bundles are deterministic.
 	modules := make([]bundle.ModuleFile, 0, len(b))
 	for url, str := range b {
-		module, err := ast.ParseModule(url, str)
-		if err != nil {
+		switch {
+		case url == ".manifest":
+			err := json.Unmarshal([]byte(str), &manifest)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, "error unmarshaling .manifest file: %v", err)
+				return
+			}
+		case strings.HasSuffix(url, ".rego"):
+			module, err := ast.ParseModule(url, str)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(err.Error()))
+				return
+			}
+			modules = append(modules, bundle.ModuleFile{
+				URL:    url,
+				Parsed: module,
+			})
+		case strings.HasSuffix(url, ".json"):
+			if strings.Contains(url, "/") {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, "nested data documents are not implemented in the dummy server: %s", url)
+				return
+			}
+
+			var d map[string]interface{}
+
+			err := json.Unmarshal([]byte(str), &d)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, "error unmarshaling json file: %v", err)
+				return
+			}
+
+			for k, v := range d {
+				data[k] = v
+			}
+		default:
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(err.Error()))
+			fmt.Fprintf(w, "unexpected file in dummy bundle: %s", url)
 			return
 		}
-		modules = append(modules, bundle.ModuleFile{
-			URL:    url,
-			Parsed: module,
-		})
 	}
 	sort.Slice(modules, func(i, j int) bool {
 		return modules[i].URL < modules[j].URL
@@ -384,8 +422,9 @@ func (s *Server) handleBundles(w http.ResponseWriter, r *http.Request) {
 	// Compile the bundle out into a buffer
 	buf := bytes.NewBuffer(nil)
 	err := compile.New().WithOutput(buf).WithBundle(&bundle.Bundle{
-		Data:    map[string]interface{}{},
-		Modules: modules,
+		Data:     data,
+		Modules:  modules,
+		Manifest: manifest,
 	}).Build(r.Context())
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

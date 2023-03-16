@@ -33,7 +33,7 @@ You can compile Rego policies into Wasm modules using the `opa build` subcommand
 
 For example, the `opa build` command below compiles the `example.rego` file into a
 Wasm module and packages it into an OPA bundle. The `wasm` target requires at least
-one entrypoint rule (specified by `-e`).
+one entrypoint rule (specified by `-e`, or a metadata `entrypoint` annotation).
 
 ```bash
 opa build -t wasm -e example/allow example.rego
@@ -149,7 +149,7 @@ In the ABI column, you can find the ABI version with which the export was introd
 | `entrypoints` | <div>`value_addr entrypoints(void)`</div><div>Returns the address of a mapping of entrypoints to numeric identifiers that can be selected when evaluating the policy. </div> | 1.0 |
 | `opa_eval_ctx_new` | <div>`ctx_addr opa_eval_ctx_new(void)`</div><div>Returns the address of a newly allocated evaluation context. </div> | 1.0 |
 | `opa_eval_ctx_set_input` | <div>`void opa_eval_ctx_set_input(ctx_addr, value_addr)`</div><div>Set the input value to use during evaluation. This must be called before each `eval()` call. If the input value is not set before evaluation, references to the `input` document result produce no results (i.e., they are undefined.) </div> | 1.0 |
-| `opa_eval_ctx_set_data` | <div>`void opa_eval_ctx_set_data(ctx_addr, value_addr)` </div><div>Set the data value to use during evalutaion. This should be called before each `eval()` call. If the data value is not set before evalutaion, references to base `data` documents produce no results (i.e., they are undefined.) </div> | 1.0 |
+| `opa_eval_ctx_set_data` | <div>`void opa_eval_ctx_set_data(ctx_addr, value_addr)` </div><div>Set the data value to use during evaluation. This should be called before each `eval()` call. If the data value is not set before evaluation, references to base `data` documents produce no results (i.e., they are undefined.) </div> | 1.0 |
 | `opa_eval_ctx_set_entrypoint` | <div>`void opa_eval_ctx_set_entrypoint(ctx_addr, entrypoint_id)` </div><div>Set the entrypoint to evaluate. By default, entrypoint with id `0` is evaluated. </div> | 1.0 |
 | `opa_eval_ctx_get_result` | <div>`value_addr opa_eval_ctx_get_result(ctx_addr)`</div><div>Get the result set produced by the evaluation process. </div> | 1.0 |
 | `opa_malloc` | <div>`addr opa_malloc(int32 size)`</div><div>Allocates size bytes in the shared memory and returns the starting address. </div> | 1.0 |
@@ -257,7 +257,7 @@ The (optional) `input` document for a policy can be provided by loading a JSON
  returned address. After the raw string is loaded into memory you will need to
  call the `opa_json_parse` exported method to get an address to the parsed input
  document for use in evaluations. Set the address via the
- `opa_eval_ctx_set_input` exported functoin supplying the evaluation context
+ `opa_eval_ctx_set_input` exported function supplying the evaluation context
  address and parsed input document address.
 
 #### External Data

@@ -28,6 +28,12 @@ This tutorial requires [Docker Compose](https://docs.docker.com/compose/install/
 
 Create a policy that allows users to request their own salary as well as the salary of their direct subordinates.
 
+**First** create a directory named `bundles` and cd into it.
+```sh
+mkdir bundles
+cd bundles
+```
+
 **example.rego**:
 
 ```live:example:module:openable
@@ -53,13 +59,14 @@ allow {
 }
 ```
 
-Then, build a bundle.
+**Then**, build a bundle.
 
 ```shell
 opa build example.rego
+cd ..
 ```
 
-You should now see a policy bundle (`bundle.tar.gz`) in your working directory.
+You should now see a policy bundle (`bundle.tar.gz`) in your working directory (`./bundles/bundle.tar.gz`).
 
 ### 2. Bootstrap the tutorial environment using Docker Compose.
 
@@ -71,7 +78,7 @@ Next, create a `docker-compose.yml` file that runs OPA, a bundle server and the 
 version: '2'
 services:
   opa:
-    image: openpolicyagent/opa:{{< current_docker_version >}}-rootless
+    image: openpolicyagent/opa:{{< current_docker_version >}}
     ports:
     - 8181:8181
     # WARNING: OPA is NOT running with an authorization policy configured. This

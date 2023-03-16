@@ -14,8 +14,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/open-policy-agent/opa/server/types"
+
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/logging"
+	"github.com/open-policy-agent/opa/metrics"
+	"github.com/open-policy-agent/opa/profiler"
 	"github.com/open-policy-agent/opa/rego"
+	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
+	"github.com/open-policy-agent/opa/topdown/lineage"
 
 	"github.com/fortytw2/leaktest"
 	loggingtest "github.com/open-policy-agent/opa/logging/test"
@@ -102,7 +110,11 @@ func TestSDKConfigurableID(t *testing.T) {
 
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = time.now_ns()",
+			"main.rego": `
+package system
+
+main = time.now_ns()
+`,
 		}),
 	)
 
@@ -157,14 +169,14 @@ func TestDecision(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
-				package system
+package system
 
-				main = true
+main = true
 
-				str = "foo"
+str = "foo"
 
-				loopback = input
-			`,
+loopback = input
+`,
 		}),
 	)
 
@@ -213,6 +225,424 @@ func TestDecision(t *testing.T) {
 	}
 }
 
+func TestDecisionWithStrictBuiltinErrors(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package example
+
+erroring_function(number) = output {
+	output := number / 0
+}
+
+allow {
+	erroring_function(1)
+}
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	_, err = opa.Decision(ctx, sdk.DecisionOptions{
+		StrictBuiltinErrors: true,
+		Path:                "/example/allow",
+	})
+	if err == nil {
+		t.Fatal("expected error but got nil")
+	}
+
+	actual, ok := err.(*topdown.Error)
+	if !ok || actual.Code != "eval_builtin_error" {
+		t.Fatalf("expected eval_builtin_error but got %v", actual)
+	}
+
+	if exp, act := "div: divide by zero", actual.Message; exp != act {
+		t.Fatalf("expected %v but got %v", exp, act)
+	}
+}
+
+func TestDecisionWithTrace(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main {
+	trace("foobar")
+	true
+}
+			`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	tracer := topdown.NewBufferTracer()
+
+	if result, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Path:   "/system/main",
+		Tracer: tracer,
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(bool); !ok || !decision {
+		t.Fatal("expected true but got:", decision, ok)
+	}
+
+	events := lineage.Notes(*(tracer))
+	if exp, act := 3, len(events); exp != act {
+		t.Fatalf("expected %d events, got %d", exp, act)
+	}
+
+	if exp, act := "Enter", string(events[0].Op); exp != act {
+		t.Errorf("expected %s event, got %s", exp, act)
+	}
+	if exp, act := "data.system.main", string(events[0].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+	if exp, act := "Enter", string(events[1].Op); exp != act {
+		t.Errorf("expected %s event, got %v", exp, act)
+	}
+	if exp, act := "Note", string(events[2].Op); exp != act {
+		t.Errorf("expected %s event, got %v", exp, act)
+	}
+	if exp, act := "foobar", events[2].Message; exp != act {
+		t.Errorf("unexpected message, wanted %q, got %q", exp, act)
+	}
+}
+
+func TestDecisionWithMetrics(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = true
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	m := metrics.New()
+	if result, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Metrics: m,
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(bool); !ok || !decision {
+		t.Fatal("expected true but got:", decision, ok)
+	}
+
+	if exp, act := 5, len(m.All()); exp != act {
+		t.Fatalf("expected %d metrics, got %d", exp, act)
+	}
+
+	expectedRecordedMetricGroups := map[string]bool{
+		"timer_rego": false,
+		"timer_sdk":  false,
+	}
+	for k := range m.All() {
+		for group, found := range expectedRecordedMetricGroups {
+			if found {
+				continue
+			}
+			if strings.HasPrefix(k, group) {
+				expectedRecordedMetricGroups[group] = true
+			}
+		}
+	}
+	for group, found := range expectedRecordedMetricGroups {
+		if !found {
+			t.Errorf("expected metric group %s not recorded", group)
+		}
+	}
+
+}
+
+func TestDecisionWithIntrumentationAndProfile(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = true
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	m := metrics.New()
+	p := profiler.New()
+	if result, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Metrics:    m,
+		Profiler:   p,
+		Instrument: true,
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(bool); !ok || !decision {
+		t.Fatal("expected true but got:", decision, ok)
+	}
+
+	if exp, act := 26, len(m.All()); exp != act {
+		t.Fatalf("expected %d metrics, got %d", exp, act)
+	}
+
+	expectedRecordedMetricGroups := map[string]bool{
+		"counter_eval":        false,
+		"histogram_eval":      false,
+		"timer_query_compile": false,
+		"timer_eval":          false,
+		"timer_rego":          false,
+		"timer_sdk":           false,
+	}
+	for k := range m.All() {
+		for group, found := range expectedRecordedMetricGroups {
+			if found {
+				continue
+			}
+			if strings.HasPrefix(k, group) {
+				expectedRecordedMetricGroups[group] = true
+			}
+		}
+	}
+	for group, found := range expectedRecordedMetricGroups {
+		if !found {
+			t.Errorf("expected metric group %s not recorded", group)
+		}
+	}
+
+	stats := p.ReportTopNResults(10, []string{"line"})
+
+	if exp, act := 2, len(stats); exp != act {
+		t.Fatalf("expected %d stats, got %d", exp, act)
+	}
+	if exp, act := "true", string(stats[0].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+	if exp, act := "data.system.main", string(stats[1].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+
+}
+
+func TestDecisionWithProvenance(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = true
+`,
+			".manifest": `{"revision": "v1.0.0"}`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	result, err := opa.Decision(ctx, sdk.DecisionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision, ok := result.Result.(bool); !ok || !decision {
+		t.Fatal("expected true but got:", decision, ok)
+	}
+
+	expectedProvenance := types.ProvenanceV1{
+		Version: version.Version,
+		Bundles: map[string]types.ProvenanceBundleV1{
+			"test": {
+				Revision: "v1.0.0",
+			},
+		},
+	}
+
+	if result.Provenance.Version == "" {
+		t.Error("expected non empty provenance version")
+	}
+
+	if !reflect.DeepEqual(result.Provenance, expectedProvenance) {
+		t.Fatalf("expected %v but got %v", expectedProvenance, result.Provenance)
+	}
+
+}
+
+func TestDecisionWithBundleData(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = data.foo
+`,
+			"data.json": `{"foo": "bar"}`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	result, err := opa.Decision(ctx, sdk.DecisionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exp := "bar"
+	if act, ok := result.Result.(string); !ok || act != exp {
+		t.Fatalf("expected %s but got %s", exp, act)
+	}
+
+}
+
 func TestPartial(t *testing.T) {
 
 	ctx := context.Background()
@@ -220,11 +650,12 @@ func TestPartial(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
-				package test
-				allow {
-					data.junk.x = input.y
-				}
-			`,
+package test
+
+allow {
+	data.junk.x = input.y
+}
+`,
 		}),
 	)
 
@@ -291,6 +722,422 @@ func TestPartial(t *testing.T) {
 
 }
 
+func TestPartialWithStrictBuiltinErrors(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package example
+
+erroring_function(number) = output {
+	output := number / 0
+}
+
+allow {
+	erroring_function(1)
+}
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	_, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:               map[string]interface{}{},
+		Query:               "data.example.allow",
+		Unknowns:            []string{},
+		Mapper:              &sdk.RawMapper{},
+		Now:                 time.Unix(0, 1619868194450288000).UTC(),
+		StrictBuiltinErrors: true,
+	})
+	if err == nil {
+		t.Fatal("expected error but got nil")
+	}
+
+	actual, ok := err.(*topdown.Error)
+	if !ok || actual.Code != "eval_builtin_error" {
+		t.Fatalf("expected eval_builtin_error but got %v", actual)
+	}
+
+	if exp, act := "div: divide by zero", actual.Message; exp != act {
+		t.Fatalf("expected %v but got %v", exp, act)
+	}
+}
+
+func TestPartialWithTrace(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main {
+	trace("foobar")
+}
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	tracer := topdown.NewBufferTracer()
+	_, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:    map[string]interface{}{},
+		Query:    "data.system.main",
+		Unknowns: []string{},
+		Mapper:   &sdk.RawMapper{},
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+		Tracer:   tracer,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	events := lineage.Notes(*(tracer))
+
+	if exp, act := 3, len(events); exp != act {
+		t.Fatalf("expected %d events, got %d", exp, act)
+	}
+
+	if exp, act := "Enter", string(events[0].Op); exp != act {
+		t.Errorf("expected %s event, got %s", exp, act)
+	}
+	if exp, act := "data.system.main", string(events[0].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+	if exp, act := "Enter", string(events[1].Op); exp != act {
+		t.Errorf("expected %s event, got %v", exp, act)
+	}
+	if exp, act := "Note", string(events[2].Op); exp != act {
+		t.Errorf("expected %s event, got %v", exp, act)
+	}
+	if exp, act := "foobar", events[2].Message; exp != act {
+		t.Errorf("unexpected message, wanted %q, got %q", exp, act)
+	}
+}
+
+func TestPartialWithMetrics(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package test
+
+allow {
+	data.junk.x = input.y
+}
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	m := metrics.New()
+	var result *sdk.PartialResult
+	if result, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:    map[string]int{"y": 2},
+		Query:    "data.test.allow = true",
+		Unknowns: []string{"data.junk.x"},
+		Mapper:   &sdk.RawMapper{},
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+		Metrics:  m,
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(*rego.PartialQueries); !ok || decision.Queries[0].String() != "2 = data.junk.x" {
+		t.Fatal("expected &{[2 = data.junk.x] []} true but got:", decision, ok)
+	}
+
+	if exp, act := 6, len(m.All()); exp != act {
+		t.Fatalf("expected %d metrics, got %d", exp, act)
+	}
+
+	expectedRecordedMetricGroups := map[string]bool{
+		"timer_rego": false,
+		"timer_sdk":  false,
+	}
+	for k := range m.All() {
+		for group, found := range expectedRecordedMetricGroups {
+			if found {
+				continue
+			}
+			if strings.HasPrefix(k, group) {
+				expectedRecordedMetricGroups[group] = true
+			}
+		}
+	}
+	for group, found := range expectedRecordedMetricGroups {
+		if !found {
+			t.Errorf("expected metric group %s not recorded", group)
+		}
+	}
+
+}
+
+func TestPartialWithInstrumentationAndProfile(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package test
+
+allow {
+	data.junk.x = input.y
+}
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	m := metrics.New()
+	p := profiler.New()
+	var result *sdk.PartialResult
+	if result, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:      map[string]int{"y": 2},
+		Query:      "data.test.allow = true",
+		Unknowns:   []string{"data.junk.x"},
+		Mapper:     &sdk.RawMapper{},
+		Now:        time.Unix(0, 1619868194450288000).UTC(),
+		Metrics:    m,
+		Profiler:   p,
+		Instrument: true,
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(*rego.PartialQueries); !ok || decision.Queries[0].String() != "2 = data.junk.x" {
+		t.Fatal("expected &{[2 = data.junk.x] []} true but got:", decision, ok)
+	}
+
+	if exp, act := 33, len(m.All()); exp != act {
+		t.Fatalf("expected %d metrics, got %d", exp, act)
+	}
+
+	expectedRecordedMetricGroups := map[string]bool{
+		"histogram_eval":      false,
+		"histogram_partial":   false,
+		"timer_query_compile": false,
+		"timer_eval":          false,
+		"timer_partial":       false,
+		"timer_rego":          false,
+		"timer_sdk":           false,
+	}
+
+	for k := range m.All() {
+		for group, found := range expectedRecordedMetricGroups {
+			if found {
+				continue
+			}
+			if strings.HasPrefix(k, group) {
+				expectedRecordedMetricGroups[group] = true
+			}
+		}
+	}
+	for group, found := range expectedRecordedMetricGroups {
+		if !found {
+			t.Errorf("expected metric group %s not recorded", group)
+		}
+	}
+
+	stats := p.ReportTopNResults(10, []string{"line"})
+
+	if exp, act := 2, len(stats); exp != act {
+		t.Fatalf("expected %d stats, got %d", exp, act)
+	}
+	if exp, act := "data.junk.x = input.y", string(stats[0].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+	if exp, act := "data.test.allow = true", string(stats[1].Location.Text); exp != act {
+		t.Errorf("expected location %q got %q", exp, act)
+	}
+
+}
+
+func TestPartialWithProvenance(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package test
+
+allow {
+	data.junk.x = input.y
+}
+`,
+			".manifest": `{"revision": "v1.0.0"}`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	var result *sdk.PartialResult
+	if result, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:    map[string]int{"y": 2},
+		Query:    "data.test.allow = true",
+		Unknowns: []string{"data.junk.x"},
+		Mapper:   &sdk.RawMapper{},
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(*rego.PartialQueries); !ok || decision.Queries[0].String() != "2 = data.junk.x" {
+		t.Fatal("expected &{[2 = data.junk.x] []} true but got:", decision, ok)
+	}
+
+	expectedProvenance := types.ProvenanceV1{
+		Version:   version.Version,
+		Vcs:       version.Vcs,
+		Timestamp: version.Timestamp,
+		Hostname:  version.Hostname,
+		Bundles: map[string]types.ProvenanceBundleV1{
+			"test": {
+				Revision: "v1.0.0",
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(result.Provenance, expectedProvenance) {
+		t.Fatalf("expected %v but got %v", expectedProvenance, result.Provenance)
+	}
+
+}
+
 func TestUndefinedError(t *testing.T) {
 
 	ctx := context.Background()
@@ -342,7 +1189,11 @@ func TestDecisionLogging(t *testing.T) {
 
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = time.now_ns()",
+			"main.rego": `
+package system
+
+main = time.now_ns()
+`,
 		}),
 	)
 
@@ -398,13 +1249,91 @@ func TestDecisionLogging(t *testing.T) {
 
 }
 
+func TestDecisionLoggingWithNDBCache(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = time.now_ns()
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true,
+			"nd_builtin_cache": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	// Build ND builtins cache, and populate with an unused builtin.
+	ndbc := builtins.NDBCache{}
+	ndbc.Put("rand.intn", ast.NewArray(), ast.NewObject([2]*ast.Term{ast.StringTerm("z"), ast.IntNumberTerm(7)}))
+
+	// Verify that timestamp matches time.now_ns() value.
+	if _, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+		NDBCache: ndbc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := testLogger.Entries()
+
+	// Check the contents of the ND builtins cache.
+	if cache, ok := entries[0].Fields["nd_builtin_cache"]; ok {
+		// Ensure the original cache entry for rand.intn is still there.
+		if _, ok := cache.(map[string]interface{})["rand.intn"]; !ok {
+			t.Fatalf("ND builtins cache was not preserved during evaluation.")
+		}
+		// Ensure time.now_ns entry was picked up correctly.
+		if _, ok := cache.(map[string]interface{})["time.now_ns"]; !ok {
+			t.Fatalf("ND builtins cache did not observe time.now_ns call during evaluation.")
+		}
+	} else {
+		t.Fatalf("ND builtins cache missing.")
+	}
+
+}
+
 func TestQueryCaching(t *testing.T) {
 
 	ctx := context.Background()
 
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = 7",
+			"main.rego": `
+package system
+
+main = 7
+`,
 		}),
 	)
 
@@ -426,10 +1355,8 @@ func TestQueryCaching(t *testing.T) {
 		}
 	}`, server.URL())
 
-	testLogger := loggingtest.New()
 	opa, err := sdk.New(ctx, sdk.Options{
-		Config:        strings.NewReader(config),
-		ConsoleLogger: testLogger,
+		Config: strings.NewReader(config),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -437,27 +1364,27 @@ func TestQueryCaching(t *testing.T) {
 
 	defer opa.Stop(ctx)
 
-	// Execute two queries.
-	if _, err := opa.Decision(ctx, sdk.DecisionOptions{}); err != nil {
+	// Execute two queries with metrics
+	m1 := metrics.New()
+	if _, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Metrics: m1,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := opa.Decision(ctx, sdk.DecisionOptions{}); err != nil {
+	m2 := metrics.New()
+	if _, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Metrics: m2,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Expect two log entries, one with timers for query preparation and the other without.
-	entries := testLogger.Entries()
-
-	if len(entries) != 2 {
-		t.Fatal("expected two log entries but got:", entries)
+	// Expect only the metrics from the first query to contain preparation metrics
+	if _, ok := m1.All()["timer_rego_query_parse_ns"]; !ok {
+		t.Fatal("first query should have preparation metrics")
 	}
-
-	_, ok1 := entries[0].Fields["metrics"].(map[string]interface{})["timer_rego_query_parse_ns"]
-	_, ok2 := entries[1].Fields["metrics"].(map[string]interface{})["timer_rego_query_parse_ns"]
-
-	if !ok1 || ok2 {
-		t.Fatal("expected first query to require preparation but not the second")
+	if _, ok := m2.All()["timer_rego_query_parse_ns"]; ok {
+		t.Fatal("second query should not have preparation metrics")
 	}
 
 }
@@ -469,16 +1396,16 @@ func TestDiscovery(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/discovery.tar.gz", map[string]string{
 			"bundles.rego": `
-				package bundles
+package bundles
 
-				test := {"resource": "/bundles/bundle.tar.gz"}
+test := {"resource": "/bundles/bundle.tar.gz"}
 			`,
 		}),
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
-				package system
+package system
 
-				main = 7
+main = 7
 			`,
 		}),
 	)
@@ -525,7 +1452,11 @@ func TestAsync(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.Ready(callerReadyCh),
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = 7",
+			"main.rego": `
+package system
+
+main = 7
+`,
 		}),
 	)
 
@@ -637,7 +1568,11 @@ func TestConfigAsYAML(t *testing.T) {
 
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = 7",
+			"main.rego": `
+package system
+
+main = 7
+`,
 		}),
 	)
 	defer server.Stop()
@@ -663,10 +1598,18 @@ func TestConfigure(t *testing.T) {
 
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle1.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = 7",
+			"main.rego": `
+package system
+
+main = 7
+`,
 		}),
 		sdktest.MockBundle("/bundles/bundle2.tar.gz", map[string]string{
-			"main.rego": "package system\nmain = 8",
+			"main.rego": `
+package system
+
+main = 8
+`,
 		}),
 	)
 	defer server.Stop()
@@ -751,8 +1694,9 @@ func TestOpaVersion(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
-				package system
-				opa_version := opa.runtime().version
+package system
+
+opa_version := opa.runtime().version
 			`,
 		}),
 	)
@@ -796,14 +1740,15 @@ func TestOpaRuntimeConfig(t *testing.T) {
 	server := sdktest.MustNewServer(
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
-				package system
-				rt := opa.runtime()
+package system
 
-				result := {
-					"service_url": rt.config.services.test.url,
-					"bundle_resource": rt.config.bundles.test.resource,
-					"test_label": rt.config.labels.test
-				}
+rt := opa.runtime()
+
+result := {
+	"service_url": rt.config.services.test.url,
+	"bundle_resource": rt.config.bundles.test.resource,
+	"test_label": rt.config.labels.test
+}
 			`,
 		}),
 	)
@@ -856,9 +1801,11 @@ func TestPrintStatements(t *testing.T) {
 	ctx := context.Background()
 
 	s := sdktest.MustNewServer(sdktest.MockBundle("/bundles/b.tar.gz", map[string]string{
-		"x.rego": `package foo
+		"x.rego": `
+package foo
 
-		p { print("XXX") }`,
+p { print("XXX") }
+`,
 	}))
 
 	defer s.Stop()

@@ -727,10 +727,14 @@ The path separator is used to access values inside object and array documents. I
 - **input** - Provide an input document. Format is a JSON value that will be used as the value for the input document.
 - **pretty** - If parameter is `true`, response will be formatted for humans.
 - **provenance** - If parameter is `true`, response will include build/version info in addition to the result.  See [Provenance](#provenance) for more detail.
-- **explain** - Return query explanation in addition to result. Values: **full**.
+- **explain** - Return query explanation in addition to result. Values: **notes**, **fails**, **full**, **debug**.
 - **metrics** - Return query performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 - **instrument** - Instrument query evaluation and return a superset of performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 - **strict-builtin-errors** - Treat built-in function call errors as fatal and return an error immediately.
+
+#### Request Headers
+
+- **Accept-Encoding: gzip**: Indicates the server should respond with a gzip encoded body. The server will send the compressed response only if its length is above `server.encoding.gzip.min_length` value. See the configuration section
 
 #### Status Codes
 
@@ -820,12 +824,14 @@ The request body contains an object that specifies a value for [The input Docume
 #### Request Headers
 
 - **Content-Type: application/x-yaml**: Indicates the request body is a YAML encoded object.
+- **Content-Encoding: gzip**: Indicates the request body is a gzip encoded object.
+- **Accept-Encoding: gzip**: Indicates the server should respond with a gzip encoded body. The server will send the compressed response only if its length is above `server.encoding.gzip.min_length` value. See the configuration section
 
 #### Query Parameters
 
 - **pretty** - If parameter is `true`, response will formatted for humans.
 - **provenance** - If parameter is `true`, response will include build/version info in addition to the result.  See [Provenance](#provenance) for more detail.
-- **explain** - Return query explanation in addition to result. Values: **full**.
+- **explain** - Return query explanation in addition to result. Values: **notes**, **fails**, **full**, **debug**.
 - **metrics** - Return query performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 - **instrument** - Instrument query evaluation and return a superset of performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 - **strict-builtin-errors** - Treat built-in function call errors as fatal and return an error immediately.
@@ -939,6 +945,8 @@ array documents.
 #### Request Headers
 
 - **Content-Type: application/x-yaml**: Indicates the request body is a YAML encoded object.
+- **Content-Encoding: gzip**: Indicates the request body is a gzip encoded object.
+- **Accept-Encoding: gzip**: Indicates the server should respond with a gzip encoded body. The server will send the compressed response only if its length is above `server.encoding.gzip.min_length` value. See the configuration section
 
 #### Query Parameters
 
@@ -1210,7 +1218,7 @@ GET /v1/query
 
 - **q** - The ad-hoc query to execute. OPA will parse, compile, and execute the query represented by the parameter value. The value MUST be URL encoded. Only used in GET method. For POST method the query is sent as part of the request body and this parameter is not used.
 - **pretty** - If parameter is `true`, response will formatted for humans.
-- **explain** - Return query explanation in addition to result. Values: **full**.
+- **explain** - Return query explanation in addition to result. Values: **notes**, **fails**, **full**, **debug**.
 - **metrics** - Return query performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 
 #### Status Codes
@@ -1290,10 +1298,15 @@ Compile API requests contain the following fields:
 | `options`  | `object[string, any]`           | No | Additional options to use during partial evaluation. Only `disableInlining` option is supported. (default: undefined). |
 | `unknowns` | `array[string]` | No | The terms to treat as unknown during partial evaluation (default: `["input"]`]). |
 
+### Request Headers
+
+- **Content-Encoding: gzip**: Indicates the request body is a gzip encoded object.
+- **Accept-Encoding: gzip**: Indicates the server should respond with a gzip encoded body. The server will send the compressed response only if its length is above `server.encoding.gzip.min_length` value
+
 #### Query Parameters
 
 - **pretty** - If parameter is `true`, response will formatted for humans.
-- **explain** - Return query explanation in addition to result. Values: **full**.
+- **explain** - Return query explanation in addition to result. Values: **notes**, **fails**, **full**, **debug**.
 - **metrics** - Return query performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 - **instrument** - Instrument query evaluation and return a superset of performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 
@@ -1529,7 +1542,7 @@ that the server is operational. Optionally it can account for bundle activation 
 #### Query Parameters
 * `bundles` - Boolean parameter to account for bundle activation status in response. This includes any discovery bundles or bundles defined in the loaded discovery configuration.
 * `plugins` - Boolean parameter to account for plugin status in response.
-* `exclude-plugin` - String parameter to exclude a plugin from status checks. Can be added multiple times. Does nothing if `plugins` is not true. This parameter is useful for special use cases where a plugin depends on the server being fully initialized before it can fully intialize itself.
+* `exclude-plugin` - String parameter to exclude a plugin from status checks. Can be added multiple times. Does nothing if `plugins` is not true. This parameter is useful for special use cases where a plugin depends on the server being fully initialized before it can fully initialize itself.
 
 #### Status Codes
 - **200** - OPA service is healthy. If the `bundles` option is specified then all configured bundles have
@@ -1905,14 +1918,18 @@ Explanations can be requested for:
 Explanations are requested by setting the `explain` query parameter to one of
 the following values:
 
+- **off** - do not return any trace.
 - **full** - returns a full query trace containing every step in the query evaluation process.
+- **debug** - returns a full query trace including debug info.
+- **notes** - returns only note events and their context.
+- **fails** - returns only fail events and their context.
 
 By default, explanations are represented in a machine-friendly format. Set the
 `pretty` parameter to request a human-friendly format for debugging purposes.
 
 ### Trace Events
 
-When the `explain` query parameter is set to **full** , the response contains an array of Trace Event objects.
+When the `explain` query parameter is set to anything except `off`, the response contains an array of Trace Event objects.
 
 Trace Event objects contain the following fields:
 
@@ -2039,9 +2056,9 @@ Content-Type: application/json
 OPA currently supports the following query performance metrics:
 
 - **timer_rego_input_parse_ns**: time taken (in nanoseconds) to parse the input
-- **timer_rego_query_parse_ns**: time taken (in nanonseconds) to parse the query.
-- **timer_rego_query_compile_ns**: time taken (in nanonseconds) to compile the query.
-- **timer_rego_query_eval_ns**: time taken (in nanonseconds) to evaluate the query.
+- **timer_rego_query_parse_ns**: time taken (in nanoseconds) to parse the query.
+- **timer_rego_query_compile_ns**: time taken (in nanoseconds) to compile the query.
+- **timer_rego_query_eval_ns**: time taken (in nanoseconds) to evaluate the query.
 - **timer_rego_module_parse_ns**: time taken (in nanoseconds) to parse the input policy module.
 - **timer_rego_module_compile_ns**: time taken (in nanoseconds) to compile the loaded policy modules.
 - **timer_server_handler_ns**: time take (in nanoseconds) to handle the API request.

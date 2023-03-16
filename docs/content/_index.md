@@ -385,7 +385,7 @@ At some point in the future, the keyword will become _standard_, and the import 
 become a no-op that can safely be removed. This should give all users ample time to
 update their policies, so that the new keyword will not cause clashes with existing
 variable names.
-[See the docs on _future keywords_](#future-keywords) for more information.
+[See the docs on _future keywords_](./policy-language/#future-keywords) for more information.
 {{< /info >}}
 
 ##### FOR SOME (`some`)
@@ -834,7 +834,7 @@ Commonly used flags include:
 
 | Flag | Short | Description |
 | --- | --- | --- |
-| `--bundle` | `-b`| Load a bundle file or directory into OPA. This flag can be repeated. |
+| `--bundle` | `-b`| Load a [bundle file](management-bundles/#bundle-file-format) or directory into OPA. This flag can be repeated. |
 | `--data` | `-d` | Load policy or data files into OPA. This flag can be repeated. |
 | `--input` | `-i` | Load a data file and use it as `input`. This flag cannot be repeated. |
 | `--format` | `-f` | Set the output format to use. The default is `json` and is intended for programmatic use. The `pretty` format emits more human-readable output. |

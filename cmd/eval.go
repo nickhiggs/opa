@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -45,6 +44,7 @@ type evalCommandParams struct {
 	disableIndexing     bool
 	disableEarlyExit    bool
 	strictBuiltinErrors bool
+	showBuiltinErrors   bool
 	dataPaths           repeatedStringFlag
 	inputPath           string
 	imports             repeatedStringFlag
@@ -69,6 +69,7 @@ type evalCommandParams struct {
 	timeout             time.Duration
 	optimizationLevel   int
 	entrypoints         repeatedStringFlag
+	strict              bool
 }
 
 func newEvalCommandParams() evalCommandParams {
@@ -82,7 +83,7 @@ func newEvalCommandParams() evalCommandParams {
 			evalSourceOutput,
 			evalRawOutput,
 		}),
-		explain:         newExplainFlag([]string{explainModeOff, explainModeFull, explainModeNotes, explainModeFails}),
+		explain:         newExplainFlag([]string{explainModeOff, explainModeFull, explainModeNotes, explainModeFails, explainModeDebug}),
 		target:          util.NewEnumFlag(compile.TargetRego, []string{compile.TargetRego, compile.TargetWasm}),
 		count:           1,
 		profileCriteria: newrepeatedStringFlag([]string{}),
@@ -216,8 +217,9 @@ The -O flag controls the optimization level. By default, optimization is disable
 When optimization is enabled the 'eval' command generates a bundle from the files provided
 with either the --bundle or --data flag. This bundle is semantically equivalent to the input
 files however the structure of the files in the bundle may have been changed by rewriting, inlining,
-pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is enabled
-at least one entrypoint (-e) must be supplied.
+pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is
+enabled at least one entrypoint must be supplied, either via the -e option, or via entrypoint
+metadata annotations.
 
 Output Formats
 --------------
@@ -288,7 +290,8 @@ access.
 	evalCommand.Flags().BoolVarP(&params.shallowInlining, "shallow-inlining", "", false, "disable inlining of rules that depend on unknowns")
 	evalCommand.Flags().BoolVar(&params.disableIndexing, "disable-indexing", false, "disable indexing optimizations")
 	evalCommand.Flags().BoolVar(&params.disableEarlyExit, "disable-early-exit", false, "disable 'early exit' optimizations")
-	evalCommand.Flags().BoolVarP(&params.strictBuiltinErrors, "strict-builtin-errors", "", false, "treat built-in function errors as fatal")
+	evalCommand.Flags().BoolVarP(&params.strictBuiltinErrors, "strict-builtin-errors", "", false, "treat the first built-in function error encountered as fatal")
+	evalCommand.Flags().BoolVarP(&params.showBuiltinErrors, "show-builtin-errors", "", false, "collect and return all encountered built-in errors, built in errors are not fatal")
 	evalCommand.Flags().BoolVarP(&params.instrument, "instrument", "", false, "enable query instrumentation metrics (implies --metrics)")
 	evalCommand.Flags().BoolVarP(&params.profile, "profile", "", false, "perform expression profiling")
 	evalCommand.Flags().VarP(&params.profileCriteria, "profile-sort", "", "set sort order of expression profiler results")
@@ -319,6 +322,7 @@ access.
 	addSchemaFlags(evalCommand.Flags(), params.schema)
 	addTargetFlag(evalCommand.Flags(), params.target)
 	addCountFlag(evalCommand.Flags(), &params.count, "benchmark")
+	addStrictFlag(evalCommand.Flags(), &params.strict, false)
 
 	RootCommand.AddCommand(evalCommand)
 }
@@ -374,6 +378,11 @@ func eval(args []string, params evalCommandParams, w io.Writer) (bool, error) {
 		result.AggregatedMetrics = timersAggregated
 	}
 
+	var builtInErrorCount int
+	if ectx.params.showBuiltinErrors {
+		builtInErrorCount = len(*(ectx.builtInErrorList))
+	}
+
 	switch ectx.params.outputFormat.String() {
 	case evalBindingsOutput:
 		err = pr.Bindings(w, result)
@@ -391,7 +400,11 @@ func eval(args []string, params evalCommandParams, w io.Writer) (bool, error) {
 
 	if err != nil {
 		return false, err
-	} else if len(result.Errors) > 0 {
+	} else if errorCount := len(result.Errors); errorCount > 0 && errorCount != builtInErrorCount {
+		// if we only have built-in errors, we don't want to return an error. If
+		// strict-builtin-errors is set the first built-in error will be returned
+		// in a result error instead.
+
 		// If the rego package returned an error, return a special error here so
 		// that the command doesn't print the same error twice. The error will
 		// have been printed above by the presentation package.
@@ -434,11 +447,19 @@ func evalOnce(ctx context.Context, ectx *evalContext) pr.Output {
 	}
 
 	result.Errors = pr.NewOutputErrors(resultErr)
+	if ectx.builtInErrorList != nil {
+		for _, err := range *(ectx.builtInErrorList) {
+			err := err
+			result.Errors = append(result.Errors, pr.NewOutputErrors(&err)...)
+		}
+	}
 
 	if ectx.params.explain != nil {
 		switch ectx.params.explain.String() {
+		case explainModeDebug:
+			result.Explanation = lineage.Debug(*(ectx.tracer))
 		case explainModeFull:
-			result.Explanation = *(ectx.tracer)
+			result.Explanation = lineage.Full(*(ectx.tracer))
 		case explainModeNotes:
 			result.Explanation = lineage.Notes(*(ectx.tracer))
 		case explainModeFails:
@@ -469,20 +490,21 @@ func evalOnce(ctx context.Context, ectx *evalContext) pr.Output {
 }
 
 type evalContext struct {
-	params   evalCommandParams
-	metrics  metrics.Metrics
-	profiler *resettableProfiler
-	cover    *cover.Cover
-	tracer   *topdown.BufferTracer
-	regoArgs []func(*rego.Rego)
-	evalArgs []rego.EvalOption
+	params           evalCommandParams
+	metrics          metrics.Metrics
+	profiler         *resettableProfiler
+	cover            *cover.Cover
+	tracer           *topdown.BufferTracer
+	regoArgs         []func(*rego.Rego)
+	evalArgs         []rego.EvalOption
+	builtInErrorList *[]topdown.Error
 }
 
 func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 	var query string
 
 	if params.stdin {
-		bs, err := ioutil.ReadAll(os.Stdin)
+		bs, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -618,20 +640,33 @@ func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 
 	if params.strictBuiltinErrors {
 		regoArgs = append(regoArgs, rego.StrictBuiltinErrors(true))
+		if params.showBuiltinErrors {
+			return nil, fmt.Errorf("cannot use --show-builtin-errors with --strict-builtin-errors, --strict-builtin-errors will return the first built-in error encountered immediately")
+		}
+	}
+
+	var builtInErrors []topdown.Error
+	if params.showBuiltinErrors {
+		regoArgs = append(regoArgs, rego.BuiltinErrorList(&builtInErrors))
 	}
 
 	if params.capabilities != nil {
 		regoArgs = append(regoArgs, rego.Capabilities(params.capabilities.C))
 	}
 
+	if params.strict {
+		regoArgs = append(regoArgs, rego.Strict(params.strict))
+	}
+
 	evalCtx := &evalContext{
-		params:   params,
-		metrics:  m,
-		profiler: &rp,
-		cover:    c,
-		tracer:   tracer,
-		regoArgs: regoArgs,
-		evalArgs: evalArgs,
+		params:           params,
+		metrics:          m,
+		profiler:         &rp,
+		cover:            c,
+		tracer:           tracer,
+		regoArgs:         regoArgs,
+		evalArgs:         evalArgs,
+		builtInErrorList: &builtInErrors,
 	}
 
 	return evalCtx, nil
@@ -668,13 +703,13 @@ func getProfileSortOrder(sortOrder []string) []string {
 
 func readInputBytes(params evalCommandParams) ([]byte, error) {
 	if params.stdinInput {
-		return ioutil.ReadAll(os.Stdin)
+		return io.ReadAll(os.Stdin)
 	} else if params.inputPath != "" {
 		path, err := fileurl.Clean(params.inputPath)
 		if err != nil {
 			return nil, err
 		}
-		return ioutil.ReadFile(path)
+		return os.ReadFile(path)
 	}
 	return nil, nil
 }
@@ -798,6 +833,7 @@ func generateOptimizedBundle(params evalCommandParams, asBundle bool, filter loa
 		WithOptimizationLevel(params.optimizationLevel).
 		WithOutput(buf).
 		WithEntrypoints(params.entrypoints.v...).
+		WithRegoAnnotationEntrypoints(true).
 		WithPaths(paths...).
 		WithFilter(filter)
 

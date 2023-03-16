@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -17,8 +18,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/pkg/errors"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/internal/file/archive"
@@ -1610,6 +1609,7 @@ func TestMerge(t *testing.T) {
 						"bar",
 					},
 				},
+				Data: map[string]interface{}{},
 			},
 		},
 		{
@@ -1667,6 +1667,7 @@ func TestMerge(t *testing.T) {
 						Raw:         []byte("not really wasm, but good enough"),
 					},
 				},
+				Data: map[string]interface{}{},
 			},
 		},
 		{
@@ -1720,6 +1721,7 @@ func TestMerge(t *testing.T) {
 						Raw:    []byte("package baz"),
 					},
 				},
+				Data: map[string]interface{}{},
 			},
 		},
 		{
@@ -1764,6 +1766,36 @@ func TestMerge(t *testing.T) {
 			},
 		},
 		{
+			note: "merge empty data",
+			bundles: []*Bundle{
+				{
+					Manifest: Manifest{
+						Roots: &[]string{
+							"foo/bar",
+						},
+					},
+					Data: map[string]interface{}{},
+				},
+				{
+					Manifest: Manifest{
+						Roots: &[]string{
+							"baz",
+						},
+					},
+					Data: map[string]interface{}{},
+				},
+			},
+			wantBundle: &Bundle{
+				Manifest: Manifest{
+					Roots: &[]string{
+						"foo/bar",
+						"baz",
+					},
+				},
+				Data: map[string]interface{}{},
+			},
+		},
+		{
 			note: "merge plans",
 			bundles: []*Bundle{
 				{
@@ -1792,7 +1824,7 @@ func TestMerge(t *testing.T) {
 				},
 			},
 			wantBundle: &Bundle{
-
+				Data: map[string]interface{}{},
 				Manifest: Manifest{
 					Roots: &[]string{"a", "b"},
 				},

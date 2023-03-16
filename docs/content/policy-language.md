@@ -159,7 +159,7 @@ rule-name IS value IF body
 
 If the **value** is omitted, it defaults to **true**.
 
-When we query for the value of `t` we see the obvious result:
+When we query for the value of `t2` we see the obvious result:
 
 ```live:eg/rules:query:hidden
 t
@@ -909,6 +909,24 @@ max_memory := 32 { power_users[user] }
 max_memory := 4 { restricted_users[user] }
 ```
 
+### Rule Heads containing References
+
+As a shorthand for defining nested rule structures, it's valid to use references as rule heads:
+
+```live:eg/ref_heads:module
+fruit.apple.seeds = 12
+
+fruit.orange.color = "orange"
+```
+
+This module defines _two complete rules_, `data.example.fruit.apple.seeds` and `data.example.fruit.orange.color`:
+
+```live:eg/ref_heads:query:merge_down
+data.example
+```
+```live:eg/ref_heads:output
+```
+
 ### Functions
 
 Rego supports user-defined functions that can be called with the same semantics as [Built-in Functions](#built-in-functions). They have access to both the [the data Document](../philosophy/#the-opa-document-model) and [the input Document](../philosophy/#the-opa-document-model).
@@ -1488,7 +1506,7 @@ deny if input.token != "secret"
 This keyword allows more expressive rule heads for partial set rules:
 
 ```live:eg/kws/contains:module:read_only
-deny contains msg { msg := "forbdiden" }
+deny contains msg { msg := "forbidden" }
 ```
 
 `contains` was introduced in [v0.42.0](https://github.com/open-policy-agent/opa/releases/tag/v0.42.0).
@@ -1576,7 +1594,7 @@ names_with_dev
 The `every` keyword takes an (optional) key argument, a value argument, a domain, and a
 block of further queries, its "body".
 
-The keyword is used to explicity assert that its body is true for *any element in the domain*.
+The keyword is used to explicitly assert that its body is true for *any element in the domain*.
 It will iterate over the domain, bind its variables, and check that the body holds
 for those bindings.
 If one of the bindings does not yield a successful evaluation of the body, the overall
@@ -1726,7 +1744,8 @@ When `<target>` is a reference to a function, like `http.send`, then
 its `<value>` can be any of the following:
 1. a value: `with http.send as {"body": {"success": true }}`
 2. a reference to another function: `with http.send as mock_http_send`
-3. a reference to another (possibly custom) built-in function: `with custom_builtin as less_strict_custom_builtin`.
+3. a reference to another (possibly custom) built-in function: `with custom_builtin as less_strict_custom_builtin`
+4. a reference to a rule that will be used as the _value_.
 
 When the replacement value is a function, its arity needs to match the replaced
 function's arity; and the types must be compatible.
@@ -1834,7 +1853,8 @@ default <name> := <term>
 
 The term may be any scalar, composite, or comprehension value but it may not be
 a variable or reference. If the value is a composite then it may not contain
-variables or references.
+variables or references. Comprehensions however may, as the result of a
+comprehension is never undefined.
 
 ## Else Keyword
 

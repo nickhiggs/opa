@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -171,6 +170,7 @@ func TestTopDownUnsupportedBuiltin(t *testing.T) {
 	compiler := ast.NewCompiler()
 	store := inmem.New()
 	txn := storage.NewTransactionOrDie(ctx, store)
+	defer store.Abort(ctx, txn)
 	q := NewQuery(body).WithCompiler(compiler).WithStore(store).WithTransaction(txn)
 	_, err := q.Run(ctx)
 
@@ -868,6 +868,68 @@ func TestTopdownStoreAST(t *testing.T) {
 	}
 }
 
+func TestTopdownLazyObj(t *testing.T) {
+	body := ast.MustParseBody(`data.stored = x`)
+	ctx := context.Background()
+	compiler := ast.NewCompiler()
+	foo := map[string]interface{}{
+		"foo": "bar",
+	}
+	store := inmem.NewFromObject(map[string]interface{}{
+		"stored": foo,
+	})
+	txn := storage.NewTransactionOrDie(ctx, store)
+	defer store.Abort(ctx, txn)
+
+	q := NewQuery(body).WithCompiler(compiler).WithStore(store).WithTransaction(txn)
+	qrs, err := q.Run(ctx)
+	if err != nil {
+		t.Fatalf("expected no error got %v", err)
+	}
+	act, ok := qrs[0]["x"].Value.(ast.Object)
+	if !ok {
+		t.Errorf("expected obj, got %T: %[1]v", qrs[0]["x"].Value)
+	}
+	// NOTE(sr): we're using DeepEqual here because we want to assert that the structs
+	// match -- as far as the interface `ast.Object` is concerned `*lazyObj` and `*object`
+	// should be indistinguishable.
+	if exp := ast.LazyObject(foo); !reflect.DeepEqual(act, exp) {
+		t.Errorf("expected %T, got %T", exp, act)
+	}
+}
+
+func TestTopdownLazyObjOptOut(t *testing.T) {
+	body := ast.MustParseBody(`data.stored = x`)
+	ctx := context.Background()
+	compiler := ast.NewCompiler()
+	foo := map[string]interface{}{
+		"foo": "bar",
+	}
+	store := inmem.NewFromObject(map[string]interface{}{
+		"stored": foo,
+	})
+	txn := storage.NewTransactionOrDie(ctx, store)
+	defer store.Abort(ctx, txn)
+
+	q := NewQuery(body).WithCompiler(compiler).WithStore(store).WithTransaction(txn).WithStrictObjects(true)
+	qrs, err := q.Run(ctx)
+	if err != nil {
+		t.Fatalf("expected no error got %v", err)
+	}
+	act, ok := qrs[0]["x"].Value.(ast.Object)
+	if !ok {
+		t.Errorf("expected %T, got %T: %[2]v", act, qrs[0]["x"].Value)
+	}
+	// NOTE(sr): We can't type-assert *ast.lazyObj because it's not exported -- but we can retry
+	// the assertion that we've done in the not-opt-out case, and see that it no longer holds:
+	if exp := ast.LazyObject(foo); reflect.DeepEqual(act, exp) {
+		t.Errorf("expected %T, got %T", exp, act)
+	}
+	if exp := ast.NewObject(ast.Item(ast.StringTerm("foo"), ast.StringTerm("bar"))); exp.Compare(act) != 0 {
+		t.Errorf("expected %v to be equal to %v", exp, act)
+	}
+}
+
 func compileModules(input []string) *ast.Compiler {
 
 	mods := map[string]*ast.Module{}
@@ -931,7 +993,6 @@ func compileRules(imports []string, input []string, modules []string) (*ast.Comp
 //
 // Avoid the following top-level keys: i, j, k, p, q, r, v, x, y, z.
 // These are used for rule names, local variables, etc.
-//
 func loadSmallTestData() map[string]interface{} {
 	var data map[string]interface{}
 	err := util.UnmarshalJSON([]byte(`{
@@ -1273,10 +1334,10 @@ func init() {
 		),
 	})
 
-	RegisterFunctionalBuiltin1("test.sleep", func(a ast.Value) (ast.Value, error) {
-		d, _ := time.ParseDuration(string(a.(ast.String)))
+	RegisterBuiltinFunc("test.sleep", func(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+		d, _ := time.ParseDuration(string(operands[0].Value.(ast.String)))
 		time.Sleep(d)
-		return ast.Null{}, nil
+		return iter(ast.NullTerm())
 	})
 
 }
@@ -1360,7 +1421,7 @@ func dump(note string, modules map[string]*ast.Module, data interface{}, docpath
 
 	filename := fmt.Sprintf("test-%v-%04d.yaml", namespace, c)
 
-	if err := ioutil.WriteFile(filepath.Join(dir, filename), bs, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filename), bs, 0644); err != nil {
 		panic(err)
 	}
 

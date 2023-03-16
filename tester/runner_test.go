@@ -75,19 +75,33 @@ func testRun(t *testing.T, conf testRunConfig) map[string]*ast.Module {
 			`,
 		"/b_test.rego": `package bar
 
-		test_duplicate { true }`,
+			test_duplicate { true }`,
+		"/c_test.rego": `package baz
+
+			a.b.test_duplicate { false }
+			a.b.test_duplicate { true }
+			a.b.test_duplicate { true }`,
+		// Regression test for issue #5496.
+		"/d_test.rego": `package test
+
+		a[0] := 1
+		test_pass { true }`,
 	}
 
 	tests := expectedTestResults{
-		{"data.foo", "test_pass"}:          {false, false, false},
-		{"data.foo", "test_fail"}:          {false, true, false},
-		{"data.foo", "test_fail_non_bool"}: {false, true, false},
-		{"data.foo", "test_duplicate"}:     {false, true, false},
-		{"data.foo", "test_duplicate#01"}:  {false, false, false},
-		{"data.foo", "test_duplicate#02"}:  {false, false, false},
-		{"data.foo", "test_err"}:           {true, false, false},
-		{"data.foo", "todo_test_skip"}:     {false, false, true},
-		{"data.bar", "test_duplicate"}:     {false, false, false},
+		{"data.foo", "test_pass"}:                  {false, false, false},
+		{"data.foo", "test_fail"}:                  {false, true, false},
+		{"data.foo", "test_fail_non_bool"}:         {false, true, false},
+		{"data.foo", "test_duplicate"}:             {false, true, false},
+		{"data.foo", "test_duplicate#01"}:          {false, false, false},
+		{"data.foo", "test_duplicate#02"}:          {false, false, false},
+		{"data.foo", "test_err"}:                   {true, false, false},
+		{"data.foo", "todo_test_skip"}:             {false, false, true},
+		{"data.bar", "test_duplicate"}:             {false, false, false},
+		{"data.baz", "a.b.test_duplicate"}:         {false, true, false},
+		{"data.baz", "a.b[\"test_duplicate#01\"]"}: {false, false, false},
+		{"data.baz", "a.b[\"test_duplicate#02\"]"}: {false, false, false},
+		{"data.test", "test_pass"}:                 {false, false, false},
 	}
 
 	var modules map[string]*ast.Module
@@ -186,6 +200,11 @@ func TestRunWithFilterRegex(t *testing.T) {
 		"/b_test.rego": `package bar
 
 		test_duplicate { true }`,
+		"/c_test.rego": `package baz
+
+		a.b.test_duplicate { false }
+		a.b.test_duplicate { true }
+		a.b.test_duplicate { true }`,
 	}
 
 	cases := []struct {
@@ -197,32 +216,38 @@ func TestRunWithFilterRegex(t *testing.T) {
 			note:  "all tests match",
 			regex: ".*",
 			tests: expectedTestResults{
-				{"data.foo", "test_pass"}:          {false, false, false},
-				{"data.foo", "test_fail"}:          {false, true, false},
-				{"data.foo", "test_fail_non_bool"}: {false, true, false},
-				{"data.foo", "test_duplicate"}:     {false, true, false},
-				{"data.foo", "test_duplicate#01"}:  {false, false, false},
-				{"data.foo", "test_duplicate#02"}:  {false, false, false},
-				{"data.foo", "test_err"}:           {true, false, false},
-				{"data.foo", "todo_test_skip"}:     {false, false, true},
-				{"data.foo", "todo_test_skip_too"}: {false, false, true},
-				{"data.bar", "test_duplicate"}:     {false, false, false},
+				{"data.foo", "test_pass"}:                  {false, false, false},
+				{"data.foo", "test_fail"}:                  {false, true, false},
+				{"data.foo", "test_fail_non_bool"}:         {false, true, false},
+				{"data.foo", "test_duplicate"}:             {false, true, false},
+				{"data.foo", "test_duplicate#01"}:          {false, false, false},
+				{"data.foo", "test_duplicate#02"}:          {false, false, false},
+				{"data.foo", "test_err"}:                   {true, false, false},
+				{"data.foo", "todo_test_skip"}:             {false, false, true},
+				{"data.foo", "todo_test_skip_too"}:         {false, false, true},
+				{"data.bar", "test_duplicate"}:             {false, false, false},
+				{"data.baz", "a.b.test_duplicate"}:         {false, true, false},
+				{"data.baz", "a.b[\"test_duplicate#01\"]"}: {false, false, false},
+				{"data.baz", "a.b[\"test_duplicate#02\"]"}: {false, false, false},
 			},
 		},
 		{
 			note:  "no filter",
 			regex: "",
 			tests: expectedTestResults{
-				{"data.foo", "test_pass"}:          {false, false, false},
-				{"data.foo", "test_fail"}:          {false, true, false},
-				{"data.foo", "test_fail_non_bool"}: {false, true, false},
-				{"data.foo", "test_duplicate"}:     {false, true, false},
-				{"data.foo", "test_duplicate#01"}:  {false, false, false},
-				{"data.foo", "test_duplicate#02"}:  {false, false, false},
-				{"data.foo", "test_err"}:           {true, false, false},
-				{"data.foo", "todo_test_skip"}:     {false, false, true},
-				{"data.foo", "todo_test_skip_too"}: {false, false, true},
-				{"data.bar", "test_duplicate"}:     {false, false, false},
+				{"data.foo", "test_pass"}:                  {false, false, false},
+				{"data.foo", "test_fail"}:                  {false, true, false},
+				{"data.foo", "test_fail_non_bool"}:         {false, true, false},
+				{"data.foo", "test_duplicate"}:             {false, true, false},
+				{"data.foo", "test_duplicate#01"}:          {false, false, false},
+				{"data.foo", "test_duplicate#02"}:          {false, false, false},
+				{"data.foo", "test_err"}:                   {true, false, false},
+				{"data.foo", "todo_test_skip"}:             {false, false, true},
+				{"data.foo", "todo_test_skip_too"}:         {false, false, true},
+				{"data.bar", "test_duplicate"}:             {false, false, false},
+				{"data.baz", "a.b.test_duplicate"}:         {false, true, false},
+				{"data.baz", "a.b[\"test_duplicate#01\"]"}: {false, false, false},
+				{"data.baz", "a.b[\"test_duplicate#02\"]"}: {false, false, false},
 			},
 		},
 		{
@@ -286,6 +311,15 @@ func TestRunWithFilterRegex(t *testing.T) {
 			regex: "(?i)DATA.BAR",
 			tests: expectedTestResults{
 				{"data.bar", "test_duplicate"}: {false, false, false},
+			},
+		},
+		{
+			note:  "matching ref rule halfways",
+			regex: "data.baz.a",
+			tests: expectedTestResults{
+				{"data.baz", "a.b.test_duplicate"}:         {false, true, false},
+				{"data.baz", "a.b[\"test_duplicate#01\"]"}: {false, false, false},
+				{"data.baz", "a.b[\"test_duplicate#02\"]"}: {false, false, false},
 			},
 		},
 	}
@@ -436,7 +470,8 @@ func TestRunnerPrintOutput(t *testing.T) {
 
 		test_a { print("A") }
 		test_b { false; print("B") }
-		test_c { print("C"); false }`,
+		test_c { print("C"); false }
+		p.q.r.test_d { print("D") }`,
 	}
 
 	ctx := context.Background()
@@ -461,9 +496,10 @@ func TestRunnerPrintOutput(t *testing.T) {
 		}
 
 		exp := map[string]string{
-			"test_a": "A\n",
-			"test_b": "",
-			"test_c": "C\n",
+			"test_a":       "A\n",
+			"test_b":       "",
+			"test_c":       "C\n",
+			"p.q.r.test_d": "D\n",
 		}
 
 		got := map[string]string{}
@@ -487,10 +523,10 @@ func registerSleepBuiltin() {
 		),
 	})
 
-	topdown.RegisterFunctionalBuiltin1("test.sleep", func(a ast.Value) (ast.Value, error) {
-		d, _ := time.ParseDuration(string(a.(ast.String)))
+	topdown.RegisterBuiltinFunc("test.sleep", func(_ topdown.BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+		d, _ := time.ParseDuration(string(operands[0].Value.(ast.String)))
 		time.Sleep(d)
-		return ast.Null{}, nil
+		return iter(ast.NullTerm())
 	})
 }
 

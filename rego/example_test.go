@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -343,7 +342,7 @@ func ExampleRego_Eval_persistent_storage() {
 	}
 
 	// Manually create a persistent storage-layer in a temporary directory.
-	rootDir, err := ioutil.TempDir("", "rego_example")
+	rootDir, err := os.MkdirTemp("", "rego_example")
 	if err != nil {
 		panic(err)
 	}
@@ -706,6 +705,7 @@ func ExampleRego_Eval_trace_simple() {
 	//
 	// query:1     Enter x = 1
 	// query:1     | Eval x = 1
+	// query:1     | Unify x = 1
 	// query:1     | Exit x = 1
 	// query:1     Redo x = 1
 	// query:1     | Redo x = 1
@@ -733,6 +733,7 @@ func ExampleRego_Eval_tracer() {
 	//
 	// query:1     Enter x = 1
 	// query:1     | Eval x = 1
+	// query:1     | Unify x = 1
 	// query:1     | Exit x = 1
 	// query:1     Redo x = 1
 	// query:1     | Redo x = 1

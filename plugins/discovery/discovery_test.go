@@ -6,6 +6,7 @@
 package discovery
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -13,27 +14,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/open-policy-agent/opa/storage"
-
-	"github.com/open-policy-agent/opa/rego"
-
-	"github.com/open-policy-agent/opa/logging/test"
-
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	bundleApi "github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/download"
+	"github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
 	bundlePlugin "github.com/open-policy-agent/opa/plugins/bundle"
 	"github.com/open-policy-agent/opa/plugins/logs"
 	"github.com/open-policy-agent/opa/plugins/status"
+	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/server"
+	"github.com/open-policy-agent/opa/storage"
 	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/util"
@@ -381,6 +380,555 @@ func (r *reconfigureTestPlugin) Reconfigure(_ context.Context, config interface{
 	r.counts["reconfig"]++
 }
 
+func TestStartWithBundlePersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	bundleDir := filepath.Join(dir, "bundles", "config")
+
+	err := os.MkdirAll(bundleDir, os.ModePerm)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.tar.gz"), buf.Bytes(), 0644); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.Config.PersistenceDirectory = &dir
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = disco.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	ensurePluginState(t, disco, plugins.StateOK)
+
+	// verify the test plugin was registered on the manager
+	if plugin := manager.Plugin("test_plugin"); plugin == nil {
+		t.Fatalf("expected \"test_plugin\" to be regsitered with the plugin manager")
+	}
+
+	// verify the test plugin was started
+	count, ok := testPlugin.counts["start"]
+	if !ok {
+		t.Fatal("expected test plugin to have start counter")
+	}
+
+	if count != 1 {
+		t.Fatalf("expected test plugin to have a start count of 1 but got %v", count)
+	}
+}
+
+func TestOneShotWithBundlePersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	disco.bundlePersistPath = filepath.Join(dir, ".opa")
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	// simulate a bundle download error with no bundle on disk
+	disco.oneShot(ctx, download.Update{Error: fmt.Errorf("unknown error")})
+
+	if disco.status.Message == "" {
+		t.Fatal("expected error but got none")
+	}
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	// download a bundle and persist to disk. Then verify the bundle persisted to disk
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+	expBndl := initialBundle.Copy()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	disco.oneShot(ctx, download.Update{Bundle: initialBundle, ETag: "etag-1", Raw: &buf})
+
+	ensurePluginState(t, disco, plugins.StateOK)
+
+	result, err := disco.loadBundleFromDisk()
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	if !result.Equal(expBndl) {
+		t.Fatalf("expected the downloaded bundle to be equal to the one loaded from disk: result=%v, exp=%v", result, expBndl)
+	}
+
+	// verify the test plugin was registered on the manager
+	if plugin := manager.Plugin("test_plugin"); plugin == nil {
+		t.Fatalf("expected \"test_plugin\" to be regsitered with the plugin manager")
+	}
+
+	// verify the test plugin was started
+	count, ok := testPlugin.counts["start"]
+	if !ok {
+		t.Fatal("expected test plugin to have start counter")
+	}
+
+	if count != 1 {
+		t.Fatalf("expected test plugin to have a start count of 1 but got %v", count)
+	}
+}
+
+func TestLoadAndActivateBundleFromDisk(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	disco.bundlePersistPath = filepath.Join(dir, ".opa")
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	// persist a bundle to disk and then load it
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				},
+				"services": {
+					"acmecorp": {
+						"url": "http://localhost:8181"
+					}
+				},
+				"bundles": {
+					"authz": {
+						"service": "acmecorp"
+					}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err = disco.saveBundleToDisk(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	disco.loadAndActivateBundleFromDisk(ctx)
+
+	ensurePluginState(t, disco, plugins.StateOK)
+
+	// verify the test plugin was registered on the manager
+	if plugin := manager.Plugin("test_plugin"); plugin == nil {
+		t.Fatalf("expected \"test_plugin\" to be regsitered with the plugin manager")
+	}
+
+	// verify the test plugin was started
+	count, ok := testPlugin.counts["start"]
+	if !ok {
+		t.Fatal("expected test plugin to have start counter")
+	}
+
+	if count != 1 {
+		t.Fatalf("expected test plugin to have a start count of 1 but got %v", count)
+	}
+
+	// verify the bundle plugin was registered on the manager
+	if plugin := bundlePlugin.Lookup(disco.manager); plugin == nil {
+		t.Fatalf("expected bundle plugin to be regsitered with the plugin manager")
+	}
+}
+
+func TestLoadAndActivateSignedBundleFromDisk(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	disco.bundlePersistPath = filepath.Join(dir, ".opa")
+	disco.config.Signing = bundle.NewVerificationConfig(map[string]*bundle.KeyConfig{"foo": {Key: "secret", Algorithm: "HS256"}}, "foo", "", nil)
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	// persist a bundle to disk and then load it
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				},
+				"services": {
+					"acmecorp": {
+						"url": "http://localhost:8181"
+					}
+				},
+				"bundles": {
+					"authz": {
+						"service": "acmecorp"
+					}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	if err := initialBundle.GenerateSignature(bundle.NewSigningConfig("secret", "HS256", ""), "foo", false); err != nil {
+		t.Fatal("Unexpected error:", err)
+	}
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err = disco.saveBundleToDisk(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	disco.loadAndActivateBundleFromDisk(ctx)
+
+	ensurePluginState(t, disco, plugins.StateOK)
+
+	// verify the test plugin was registered on the manager
+	if plugin := manager.Plugin("test_plugin"); plugin == nil {
+		t.Fatalf("expected \"test_plugin\" to be regsitered with the plugin manager")
+	}
+
+	// verify the test plugin was started
+	count, ok := testPlugin.counts["start"]
+	if !ok {
+		t.Fatal("expected test plugin to have start counter")
+	}
+
+	if count != 1 {
+		t.Fatalf("expected test plugin to have a start count of 1 but got %v", count)
+	}
+
+	// verify the bundle plugin was registered on the manager
+	if plugin := bundlePlugin.Lookup(disco.manager); plugin == nil {
+		t.Fatalf("expected bundle plugin to be regsitered with the plugin manager")
+	}
+}
+
+func TestLoadAndActivateBundleFromDiskMaxAttempts(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	disco.bundlePersistPath = filepath.Join(dir, ".opa")
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	// persist a bundle to disk and then load it
+	// this bundle should never activate as the service discovery depends on is modified
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				},
+				"services": {
+					"localhost": {
+						"url": "http://localhost:8181"
+					}
+				},
+				"bundles": {
+					"authz": {
+						"service": "localhost"
+					}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err = disco.saveBundleToDisk(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	disco.loadAndActivateBundleFromDisk(ctx)
+
+	ensurePluginState(t, disco, plugins.StateNotReady)
+
+	if len(manager.Plugins()) != 0 {
+		t.Fatal("expected no plugins to be registered with the plugin manager")
+	}
+}
+
+func TestSaveBundleToDiskNew(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disco.bundlePersistPath = filepath.Join(dir, ".opa")
+
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err = disco.saveBundleToDisk(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+}
+
+func TestSaveBundleToDiskNewConfiguredPersistDir(t *testing.T) {
+	dir := t.TempDir()
+
+	manager, err := plugins.New([]byte(`{
+		"labels": {"x": "y"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+		"discovery": {"name": "config", "persist": true},
+	}`), "test-id", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// configure persistence dir instead of using the default. Discover plugin should pick this up
+	manager.Config.PersistenceDirectory = &dir
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = disco.Start(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	initialBundle := makeDataBundle(1, `
+		{
+			"config": {
+				"labels": {"x": "label value changed"},
+				"default_decision": "bar/baz",
+				"default_authorization_decision": "baz/qux",
+				"plugins": {
+					"test_plugin": {"a": "b"}
+				}
+			}
+		}
+	`)
+
+	initialBundle.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).Write(*initialBundle); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err = disco.saveBundleToDisk(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	expectBundlePath := filepath.Join(dir, "bundles", "config", "bundle.tar.gz")
+	_, err = os.Stat(expectBundlePath)
+	if err != nil {
+		t.Errorf("expected bundle persisted at path %v, %v", expectBundlePath, err)
+	}
+}
+
 func TestReconfigure(t *testing.T) {
 
 	manager, err := plugins.New([]byte(`{
@@ -475,7 +1023,6 @@ func TestReconfigure(t *testing.T) {
 	if !reflect.DeepEqual(testPlugin.counts, map[string]int{"start": 1, "reconfig": 1}) {
 		t.Errorf("Expected one plugin start and one reconfig but got %v", testPlugin)
 	}
-
 }
 
 func TestReconfigureWithUpdates(t *testing.T) {
@@ -1537,6 +2084,70 @@ func TestInterQueryBuiltinCacheConfigUpdate(t *testing.T) {
 	}
 }
 
+func TestNDBuiltinCacheConfigUpdate(t *testing.T) {
+	type exampleConfig struct {
+		v bool
+	}
+	var config1 *exampleConfig
+	var config2 *exampleConfig
+	manager, err := plugins.New([]byte(`{
+		"discovery": {"name": "config"},
+		"services": {
+			"localhost": {
+				"url": "http://localhost:9999"
+			}
+		},
+  }`), "test-id", inmem.New())
+	manager.RegisterNDCacheTrigger(func(x bool) {
+		if config1 == nil {
+			config1 = &exampleConfig{v: x}
+		} else if config2 == nil {
+			config2 = &exampleConfig{v: x}
+		} else {
+			t.Fatal("Expected cache trigger to only be called twice")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPlugin := &reconfigureTestPlugin{counts: map[string]int{}}
+	testFactory := testFactory{p: testPlugin}
+
+	disco, err := New(manager, Factories(map[string]plugins.Factory{"test_plugin": testFactory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	initialBundle := makeDataBundle(1, `{
+		"config": {
+			"nd_builtin_cache": true
+		}
+	}`)
+
+	disco.oneShot(ctx, download.Update{Bundle: initialBundle})
+
+	// Verify NDBuiltinCache is triggered with initial config
+	if config1 == nil || config1.v != true {
+		t.Fatalf("Expected ND builtin cache to be enabled after initial discovery, got: %v", config1.v)
+	}
+
+	// Verify NDBuiltinCache is reconfigured
+	updatedBundle := makeDataBundle(2, `{
+		"config": {
+			"nd_builtin_cache": false
+		}
+	}`)
+
+	disco.oneShot(ctx, download.Update{Bundle: updatedBundle})
+
+	if config2 == nil || config2.v != false {
+		t.Fatalf("Expected ND builtin cache to be disabled after discovery reconfigure, got: %v", config2.v)
+	}
+}
+
 func TestPluginManualTriggerLifecycle(t *testing.T) {
 	ctx := context.Background()
 	m := metrics.New()
@@ -2065,4 +2676,16 @@ func (t *testFixtureServer) start() {
 
 func (t *testFixtureServer) stop() {
 	t.server.Close()
+}
+
+func ensurePluginState(t *testing.T, d *Discovery, state plugins.State) {
+	t.Helper()
+	status, ok := d.manager.PluginStatus()[Name]
+	if !ok {
+		t.Fatalf("Expected to find state for %s, found nil", Name)
+		return
+	}
+	if status.State != state {
+		t.Fatalf("Unexpected status state found in plugin manager for %s:\n\n\tFound:%+v\n\n\tExpected: %s", Name, status.State, state)
+	}
 }

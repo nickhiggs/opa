@@ -6,6 +6,9 @@
 This is a list of organizations that have spoken publicly about their adoption or
 production users that have added themselves (in alphabetical order):
 
+* [2U, Inc](https://2u.com) has incorporated OPA into their SDLC for both Terraform and Kubernetes deployments.
+  Shift left!
+
 * [Appsflyer](https://www.appsflyer.com/) uses OPA to make consistent
   authorization decisions by hundreds of microservices for UI and API data
   access. All authorization decisions are delegated to OPA that is deployed as a
@@ -71,6 +74,11 @@ production users that have added themselves (in alphabetical order):
   tested as "SDLC guardrails", then re-validated at deployment time by a range of
   OPA-based admission controllers, covering single-tenant environments and hard
   multi-tenancy configurations.
+
+* [Digraph](https://www.getdigraph.com) is a developer-first cloud compliance platform
+  that uses OPA to let security teams detect and resolve non-compliant infrastructure
+  changes before they're deployed to production, and produce audit trails to eliminate
+  manual work and accelerate audit processes like SOC and ISO.
 
 * [Fugue](https://fugue.co) is a cloud security SaaS that uses OPA to
   classify compliance violations and security risks in AWS and Azure
@@ -277,4 +285,5 @@ testing include:
 * [State Street Corporation](http://www.statestreet.com/)
 
 If you have adopted OPA and would like to be included in this list,
-feel free to submit a PR.
+feel free to submit a PR updating this file or
+[open an issue](https://github.com/open-policy-agent/opa/issues/new?assignees=&labels=adopt-opa&template=adopt-opa.yaml&title=organization_name+has+adopted+OPA).

@@ -38,6 +38,7 @@ opa bench <query> [flags]
 ```
       --benchmem                       report memory allocations with benchmark results (default true)
   -b, --bundle string                  set bundle file(s) or directory path(s). This flag can be repeated.
+  -c, --config-file string             set path of configuration file
       --count int                      number of times to repeat each benchmark (default 1)
   -d, --data string                    set policy or data file(s). This flag can be repeated.
       --e2e                            run benchmarks against a running OPA server
@@ -118,20 +119,23 @@ The 'build' command supports targets (specified by -t):
     rego    The default target emits a bundle containing a set of policy and data files
             that are semantically equivalent to the input files. If optimizations are
             disabled the output may simply contain a copy of the input policy and data
-            files. If optimization is enabled at least one entrypoint (-e) must be supplied.
+            files. If optimization is enabled at least one entrypoint must be supplied,
+            either via the -e option, or via entrypoint metadata annotations.
 
     wasm    The wasm target emits a bundle containing a WebAssembly module compiled from
             the input files for each specified entrypoint. The bundle may contain the
             original policy or data files.
 
     plan    The plan target emits a bundle containing a plan, i.e., an intermediate
-			representation compiled from the input files for each specified entrypoint.
-			This is for further processing, OPA cannot evaluate a "plan bundle" like it
-			can evaluate a wasm or rego bundle.
+            representation compiled from the input files for each specified entrypoint.
+            This is for further processing, OPA cannot evaluate a "plan bundle" like it
+            can evaluate a wasm or rego bundle.
 
-The -e flag tells the 'build' command which documents will be queried by the software
-asking for policy decisions, so that it can focus optimization efforts and ensure
-that document is not eliminated by the optimizer.
+The -e flag tells the 'build' command which documents (entrypoints) will be queried by 
+the software asking for policy decisions, so that it can focus optimization efforts and 
+ensure that document is not eliminated by the optimizer.
+Note: Unless the --prune-unused flag is used, any rule transitively referring to a 
+package or rule declared as an entrypoint will also be enumerated as an entrypoint.
 
 ### Signing
 
@@ -321,10 +325,10 @@ Check Rego source files
 ### Synopsis
 
 Check Rego source files for parse and compilation errors.
-
-If the 'check' command succeeds in parsing and compiling the source file(s), no output
-is produced. If the parsing or compiling fails, 'check' will output the errors
-and exit with a non-zero exit code.
+	
+	If the 'check' command succeeds in parsing and compiling the source file(s), no output
+	is produced. If the parsing or compiling fails, 'check' will output the errors
+	and exit with a non-zero exit code.
 
 ```
 opa check <path> [path [...]] [flags]
@@ -462,8 +466,9 @@ The -O flag controls the optimization level. By default, optimization is disable
 When optimization is enabled the 'eval' command generates a bundle from the files provided
 with either the --bundle or --data flag. This bundle is semantically equivalent to the input
 files however the structure of the files in the bundle may have been changed by rewriting, inlining,
-pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is enabled
-at least one entrypoint (-e) must be supplied.
+pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is
+enabled at least one entrypoint must be supplied, either via the -e option, or via entrypoint
+metadata annotations.
 
 ### Output Formats
 
@@ -525,7 +530,7 @@ opa eval <query> [flags]
       --disable-indexing                                  disable indexing optimizations
       --disable-inlining stringArray                      set paths of documents to exclude from inlining
   -e, --entrypoint string                                 set slash separated entrypoint path
-      --explain {off,full,notes,fails}                    enable query explanations (default off)
+      --explain {off,full,notes,fails,debug}              enable query explanations (default off)
       --fail                                              exits with non-zero exit code on undefined/empty result and errors
       --fail-defined                                      exits with non-zero exit code on defined/non-empty result and errors
   -f, --format {json,values,bindings,pretty,source,raw}   set output format (default json)
@@ -544,9 +549,11 @@ opa eval <query> [flags]
       --profile-sort string                               set sort order of expression profiler results
   -s, --schema string                                     set schema file path or directory path
       --shallow-inlining                                  disable inlining of rules that depend on unknowns
+      --show-builtin-errors                               collect and return all encountered built-in errors, built in errors are not fatal
       --stdin                                             read query from stdin
   -I, --stdin-input                                       read input document from stdin
-      --strict-builtin-errors                             treat built-in function errors as fatal
+  -S, --strict                                            enable compiler strict mode
+      --strict-builtin-errors                             treat the first built-in function error encountered as fatal
   -t, --target {rego,wasm}                                set the runtime to exercise (default rego)
       --timeout duration                                  set eval timeout (default unlimited)
   -u, --unknowns stringArray                              set paths to treat as unknown during partial evaluation (default [input])
@@ -589,6 +596,8 @@ opa exec <path> [<path> [...]] [flags]
   -b, --bundle string                        set bundle file(s) or directory path(s). This flag can be repeated.
   -c, --config-file string                   set path of configuration file
       --decision string                      set decision to evaluate
+      --fail                                 exits with non-zero exit code on undefined/empty result and errors
+      --fail-defined                         exits with non-zero exit code on defined/non-empty result and errors
   -f, --format {pretty,json}                 set output format (default pretty)
   -h, --help                                 help for exec
       --log-format {text,json,json-pretty}   set log format (default json)
@@ -702,6 +711,7 @@ opa parse <path> [flags]
 ```
   -f, --format {pretty,json}   set output format (default pretty)
   -h, --help                   help for parse
+      --json-include string    include or exclude optional elements. By default comments are included. Current options: locations, comments. E.g. --json-include locations,-comments will include locations and exclude comments.
 ```
 
 ____
@@ -766,6 +776,18 @@ Use the "help input" command in the interactive shell to see more options.
 File paths can be specified as URLs to resolve ambiguity in paths containing colons:
 
     $ opa run file:///c:/path/to/data.json
+
+URL paths to remote public bundles (http or https) will be parsed as shorthand
+configuration equivalent of using repeated --set flags to accomplish the same:
+
+	$ opa run -s https://example.com/bundles/bundle.tar.gz
+
+The above shorthand command is identical to:
+
+    $ opa run -s --set "services.cli1.url=https://example.com" \
+                 --set "bundles.cli1.service=cli1" \
+                 --set "bundles.cli1.resource=/bundles/bundle.tar.gz" \
+                 --set "bundles.cli1.persist=true"
 
 The 'run' command can also verify the signature of a signed bundle.
 A signed bundle is a normal OPA bundle that includes a file
@@ -1037,23 +1059,23 @@ opa test <path> [path [...]] [flags]
 ### Options
 
 ```
-      --bench                          benchmark the unit tests
-      --benchmem                       report memory allocations with benchmark results (default true)
-  -b, --bundle                         load paths as bundle files or root directories
-      --capabilities string            set capabilities version or capabilities.json file path
-      --count int                      number of times to repeat each test (default 1)
-  -c, --coverage                       report coverage (overrides debug tracing)
-  -z, --exit-zero-on-skipped           skipped tests return status 0
-      --explain {fails,full,notes}     enable query explanations (default fails)
-  -f, --format {pretty,json,gobench}   set output format (default pretty)
-  -h, --help                           help for test
-      --ignore strings                 set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
-  -m, --max-errors int                 set the number of errors to allow before compilation fails early (default 10)
-  -r, --run string                     run only test cases matching the regular expression.
-  -t, --target {rego,wasm}             set the runtime to exercise (default rego)
-      --threshold float                set coverage threshold and exit with non-zero status if coverage is less than threshold %
-      --timeout duration               set test timeout (default 5s, 30s when benchmarking)
-  -v, --verbose                        set verbose reporting mode
+      --bench                              benchmark the unit tests
+      --benchmem                           report memory allocations with benchmark results (default true)
+  -b, --bundle                             load paths as bundle files or root directories
+      --capabilities string                set capabilities version or capabilities.json file path
+      --count int                          number of times to repeat each test (default 1)
+  -c, --coverage                           report coverage (overrides debug tracing)
+  -z, --exit-zero-on-skipped               skipped tests return status 0
+      --explain {fails,full,notes,debug}   enable query explanations (default fails)
+  -f, --format {pretty,json,gobench}       set output format (default pretty)
+  -h, --help                               help for test
+      --ignore strings                     set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
+  -m, --max-errors int                     set the number of errors to allow before compilation fails early (default 10)
+  -r, --run string                         run only test cases matching the regular expression.
+  -t, --target {rego,wasm}                 set the runtime to exercise (default rego)
+      --threshold float                    set coverage threshold and exit with non-zero status if coverage is less than threshold %
+      --timeout duration                   set test timeout (default 5s, 30s when benchmarking)
+  -v, --verbose                            set verbose reporting mode
 ```
 
 ____

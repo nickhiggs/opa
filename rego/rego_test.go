@@ -245,13 +245,13 @@ func TestRegoCancellation(t *testing.T) {
 		),
 	})
 
-	topdown.RegisterFunctionalBuiltin1("test.sleep", func(a ast.Value) (ast.Value, error) {
-		d, _ := time.ParseDuration(string(a.(ast.String)))
+	topdown.RegisterBuiltinFunc("test.sleep", func(_ topdown.BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+		d, _ := time.ParseDuration(string(operands[0].Value.(ast.String)))
 		time.Sleep(d)
-		return ast.Null{}, nil
+		return iter(ast.NullTerm())
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*50)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 	r := New(Query(`test.sleep("1s")`))
 	rs, err := r.Eval(ctx)
 	cancel()
@@ -1867,7 +1867,6 @@ func TestRegoCustomBuiltinPartialPropagate(t *testing.T) {
 }
 
 func TestRegoPartialResultRecursiveRefs(t *testing.T) {
-
 	r := New(Query("data"), Module("test.rego", `package foo.bar
 
 	default p = false
@@ -2086,7 +2085,7 @@ func TestEvalWithNDCache(t *testing.T) {
 	}
 
 	// Check and make sure we got exactly 2x items back in the ND builtin cache.
-	// NDBuiltinsCache always has the structure: map[ast.String]map[ast.Array]ast.Value
+	// NDBuiltinCache always has the structure: map[ast.String]map[ast.Array]ast.Value
 	if len(ndBC) != 2 {
 		t.Fatalf("Expected exactly 2 items in non-deterministic builtin cache. Found %d items.\n", len(ndBC))
 	}
@@ -2254,6 +2253,23 @@ func TestStrictBuiltinErrors(t *testing.T) {
 	}
 }
 
+func TestBuiltinErrorList(t *testing.T) {
+	var buf []topdown.Error
+
+	_, err := New(Query("1/0"), BuiltinErrorList(&buf)).Eval(context.Background())
+	if err != nil {
+		t.Fatal("unexpected error")
+	}
+
+	if len(buf) != 1 {
+		t.Fatal("expected 1 error in buffer")
+	}
+
+	if buf[0].Error() != "1/0: eval_builtin_error: div: divide by zero" {
+		t.Fatal("expected divide by zero error but got:", buf[0].Error())
+	}
+}
+
 func TestTimeSeedingOptions(t *testing.T) {
 
 	ctx := context.Background()
@@ -2362,4 +2378,98 @@ func TestGenerateJSON(t *testing.T) {
 		}),
 	)
 	assertEval(t, r, `[["converted-input"]]`)
+}
+
+func TestRegoLazyObjDefault(t *testing.T) {
+	foo := map[string]interface{}{"foo": "bar", "other": 1}
+	store := inmem.NewFromObjectWithOpts(map[string]interface{}{
+		"stored": foo,
+	})
+	r := New(
+		Query("x = data.stored"),
+		Store(store),
+	)
+
+	ctx := context.Background()
+	rs, err := r.Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, ok := rs[0].Bindings["x"]
+	if !ok {
+		t.Fatalf("expected binding for \"x\", got %v", rs[0].Bindings)
+	}
+	m, ok := act.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %T, got %T: %[2]v", m, act)
+	}
+	m["fox"] = true
+
+	if _, ok := foo["fox"]; ok {
+		t.Errorf("expected no change in foo, found one: %v", foo)
+	}
+}
+
+func TestRegoLazyObjNoRoundTripOnWrite(t *testing.T) {
+	foo := map[string]interface{}{"foo": "bar", "other": 1}
+	store := inmem.NewFromObjectWithOpts(map[string]interface{}{
+		"stored": foo,
+	}, inmem.OptRoundTripOnWrite(false))
+	r := New(
+		Query("x = data.stored"),
+		Store(store),
+	)
+
+	ctx := context.Background()
+	rs, err := r.Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, ok := rs[0].Bindings["x"]
+	if !ok {
+		t.Fatalf("expected binding for \"x\", got %v", rs[0].Bindings)
+	}
+	m, ok := act.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %T, got %T: %[2]v", m, act)
+	}
+	m["fox"] = true
+
+	if v, ok := foo["fox"]; !ok || !v.(bool) {
+		t.Errorf("expected change in foo, found none: %v", foo)
+	}
+}
+
+func TestRegoLazyObjCopyMaps(t *testing.T) {
+	foo := map[string]interface{}{"foo": "bar", "other": 1}
+	store := inmem.NewFromObjectWithOpts(map[string]interface{}{
+		"stored": foo,
+	}, inmem.OptRoundTripOnWrite(false))
+	r := New(
+		Query("x = data.stored"),
+		Store(store),
+	)
+
+	ctx := context.Background()
+	pq, err := r.PrepareForEval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := pq.Eval(ctx, EvalCopyMaps(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, ok := rs[0].Bindings["x"]
+	if !ok {
+		t.Fatalf("expected binding for \"x\", got %v", rs[0].Bindings)
+	}
+	m, ok := act.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %T, got %T: %[2]v", m, act)
+	}
+	m["fox"] = true
+
+	if _, ok := foo["fox"]; ok {
+		t.Errorf("expected no change in foo, found one: %v", foo)
+	}
 }

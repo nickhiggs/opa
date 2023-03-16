@@ -68,20 +68,19 @@ decisions: `example/authz/allow` and `example/authz/is_admin`.
 ```live:authz:module:openable,read_only
 package example.authz
 
+import future.keywords.if
+import future.keywords.in
+
 default allow := false
 
-allow {
+allow if {
     input.method == "GET"
     input.path == ["salary", input.subject.user]
 }
 
-allow {
-    is_admin
-}
+allow if is_admin
 
-is_admin {
-    input.subject.groups[_] == "admin"
-}
+is_admin if "admin" in input.subject.groups
 ```
 
 You can request specific decisions by querying for `<package path>/<rule name>`.
@@ -168,137 +167,10 @@ Content-Type: application/json
 For another example of how to integrate with OPA via HTTP see the [HTTP
 API Authorization](../http-api-authorization) tutorial.
 
-### Integrating with the Go API
-
-Use the
-[github.com/open-policy-agent/opa/rego](https://pkg.go.dev/github.com/open-policy-agent/opa/rego)
-package to embed OPA as a library inside services written in Go. To get started
-import the `rego` package:
-
-```go
-import "github.com/open-policy-agent/opa/rego"
-```
-
-The `rego` package exposes different options for customizing how policies are
-evaluated. Through the `rego` package you can supply policies and data, enable
-metrics and tracing, toggle optimizations, etc. In most cases you will:
-
-1. Use the `rego` package to construct a prepared query.
-2. Execute the prepared query to produce policy decisions.
-3. Interpret and enforce the policy decisions.
-
-Preparing queries in advance avoids parsing and compiling the policies on each
-query and improves performance considerably. Prepared queries are safe to share
-across multiple Go routines.
-
-To prepare a query create a new `rego.Rego` object by calling `rego.New(...)`
-and then invoke `rego.Rego#PrepareForEval`. The `rego.New(...)` call can be
-parameterized with different options like the query, policy module(s), data
-store, etc.
-
-```go
-
-module := `
-package example.authz
-
-import future.keywords.if
-import future.keywords.in
-
-default allow := false
-
-allow if {
-    input.method == "GET"
-    input.path == ["salary", input.subject.user]
-}
-
-allow if is_admin
-
-is_admin if "admin" in input.subject.groups
-`
-
-query, err := rego.New(
-    rego.Query("x = data.example.authz.allow"),
-    rego.Module("example.rego", module),
-    ).PrepareForEval(ctx)
-
-if err != nil {
-    // Handle error.
-}
-```
-
-Using the `query` returned by `rego.Rego#PrepareForEval` call the `Eval`
-function to evaluate the policy:
-
-```go
-input := map[string]interface{}{
-    "method": "GET",
-    "path": []interface{}{"salary", "bob"},
-    "subject": map[string]interface{}{
-        "user": "bob",
-        "groups": []interface{}{"sales", "marketing"},
-    },
-}
-
-ctx := context.TODO()
-results, err := query.Eval(ctx, rego.EvalInput(input))
-```
-
-The `rego.PreparedEvalQuery#Eval` function returns a _result set_ that contains
-the query results. If the result set is empty it indicates the query could not
-be satisfied. Each element in the result set contains a set of _variable
-bindings_ and a set of expression values. The query from above includes a single
-variable `x` so we can lookup the value and interpret it to enforce the policy
-decision.
-
-```go
-if err != nil {
-    // Handle evaluation error.
-} else if len(results) == 0 {
-    // Handle undefined result.
-} else if result, ok := results[0].Bindings["x"].(bool); !ok {
-    // Handle unexpected result type.
-} else {
-    // Handle result/decision.
-    // fmt.Printf("%+v", results) => [{Expressions:[true] Bindings:map[x:true]}]
-}
-```
-
-For the common case of policies evaluating to a single boolean value, there's
-a helper method: With `results.Allowed()`, the previous snippet can be shortened
-to
-
-```go
-results, err := query.Eval(ctx, rego.EvalInput(input))
-if err != nil {
-    // handle error
-}
-if !results.Allowed() {
-    // handle result
-}
-```
-
-For more examples of embedding OPA as a library see the
-[`rego`](https://pkg.go.dev/github.com/open-policy-agent/opa/rego#pkg-examples)
-package in the Go documentation.
-
-### WebAssembly (Wasm)
-
-Policies can be evaluated as compiled Wasm binaries.
-
-See [OPA Wasm docs](../wasm) for more details.
-
-### Intermediate Representation (IR)
-
-Policies may be compiled into evaluation plans using an intermediate representation format, suitable for custom
-compilers and evaluators.
-
-See [OPA IR docs](../ir) for more details.
-
-### SDK
+### Integrating with the Go SDK
 
 The [SDK](https://pkg.go.dev/github.com/open-policy-agent/opa/sdk) package contains high-level APIs for embedding OPA
-inside of Go programs and obtaining the output of query evaluation. To get started
-import the `sdk` package:
+inside of Go programs and obtaining the output of query evaluation. To get started, import the `sdk` package:
 
 ```go
 import "github.com/open-policy-agent/opa/sdk"
@@ -383,6 +255,136 @@ func main() {
 
 If you executed this code, the output (i.e. [Decision Log](https://www.openpolicyagent.org/docs/latest/management-decision-logs/) event)
 would be logged to the console by default.
+
+### Integrating with the Go API
+
+Use the low-level
+[github.com/open-policy-agent/opa/rego](https://pkg.go.dev/github.com/open-policy-agent/opa/rego)
+package to embed OPA as a library inside services written in Go, when only policy **evaluation** — and
+no other capabilities of OPA, like the management features — are desired. If you're unsure which one to
+use, the SDK is probably the better option.
+
+To get started import the `rego` package:
+
+```go
+import "github.com/open-policy-agent/opa/rego"
+```
+
+The `rego` package exposes different options for customizing how policies are
+evaluated. Through the `rego` package you can supply policies and data, enable
+metrics and tracing, toggle optimizations, etc. In most cases you will:
+
+1. Use the `rego` package to construct a prepared query.
+2. Execute the prepared query to produce policy decisions.
+3. Interpret and enforce the policy decisions.
+
+Preparing queries in advance avoids parsing and compiling the policies on each
+query and improves performance considerably. Prepared queries are safe to share
+across multiple Go routines.
+
+To prepare a query create a new `rego.Rego` object by calling `rego.New(...)`
+and then invoke `rego.Rego#PrepareForEval`. The `rego.New(...)` call can be
+parameterized with different options like the query, policy module(s), data
+store, etc.
+
+```go
+
+module := `
+package example.authz
+
+import future.keywords.if
+import future.keywords.in
+
+default allow := false
+
+allow if {
+    input.method == "GET"
+    input.path == ["salary", input.subject.user]
+}
+
+allow if is_admin
+
+is_admin if "admin" in input.subject.groups
+`
+
+ctx := context.TODO()
+
+query, err := rego.New(
+    rego.Query("x = data.example.authz.allow"),
+    rego.Module("example.rego", module),
+    ).PrepareForEval(ctx)
+
+if err != nil {
+    // Handle error.
+}
+```
+
+Using the `query` returned by `rego.Rego#PrepareForEval` call the `Eval`
+function to evaluate the policy:
+
+```go
+input := map[string]interface{}{
+    "method": "GET",
+    "path": []interface{}{"salary", "bob"},
+    "subject": map[string]interface{}{
+        "user": "bob",
+        "groups": []interface{}{"sales", "marketing"},
+    },
+}
+
+results, err := query.Eval(ctx, rego.EvalInput(input))
+```
+
+The `rego.PreparedEvalQuery#Eval` function returns a _result set_ that contains
+the query results. If the result set is empty it indicates the query could not
+be satisfied. Each element in the result set contains a set of _variable
+bindings_ and a set of expression values. The query from above includes a single
+variable `x` so we can lookup the value and interpret it to enforce the policy
+decision.
+
+```go
+if err != nil {
+    // Handle evaluation error.
+} else if len(results) == 0 {
+    // Handle undefined result.
+} else if result, ok := results[0].Bindings["x"].(bool); !ok {
+    // Handle unexpected result type.
+} else {
+    // Handle result/decision.
+    // fmt.Printf("%+v", results) => [{Expressions:[true] Bindings:map[x:true]}]
+}
+```
+
+For the common case of policies evaluating to a single boolean value, there's
+a helper method: With `results.Allowed()`, the previous snippet can be shortened
+to
+
+```go
+results, err := query.Eval(ctx, rego.EvalInput(input))
+if err != nil {
+    // handle error
+}
+if !results.Allowed() {
+    // handle result
+}
+```
+
+For more examples of embedding OPA as a library see the
+[`rego`](https://pkg.go.dev/github.com/open-policy-agent/opa/rego#pkg-examples)
+package in the Go documentation.
+
+### WebAssembly (Wasm)
+
+Policies can be evaluated as compiled Wasm binaries.
+
+See [OPA Wasm docs](../wasm) for more details.
+
+### Intermediate Representation (IR)
+
+Policies may be compiled into evaluation plans using an intermediate representation format, suitable for custom
+compilers and evaluators.
+
+See [OPA IR docs](../ir) for more details.
 
 ## Comparison
 

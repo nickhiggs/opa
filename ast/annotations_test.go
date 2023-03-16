@@ -52,8 +52,8 @@ p := 7`},
 	}
 
 	// Output:
-	// data.foo at foo.rego:5 has annotations {"scope":"subpackages","organizations":["Acme Corp."]}
-	// data.foo.bar at mod:3 has annotations {"scope":"package","description":"A couple of useful rules"}
+	// data.foo at foo.rego:5 has annotations {"organizations":["Acme Corp."],"scope":"subpackages"}
+	// data.foo.bar at mod:3 has annotations {"description":"A couple of useful rules","scope":"package"}
 	// data.foo.bar.p at mod:7 has annotations {"scope":"rule","title":"My Rule P"}
 }
 
@@ -102,8 +102,8 @@ p := 7`},
 
 	// Output:
 	// data.foo.bar.p at mod:7 has annotations {"scope":"rule","title":"My Rule P"}
-	// data.foo.bar at mod:3 has annotations {"scope":"package","description":"A couple of useful rules"}
-	// data.foo at foo.rego:5 has annotations {"scope":"subpackages","organizations":["Acme Corp."]}
+	// data.foo.bar at mod:3 has annotations {"description":"A couple of useful rules","scope":"package"}
+	// data.foo at foo.rego:5 has annotations {"organizations":["Acme Corp."],"scope":"subpackages"}
 }
 
 func TestAnnotationSet_Flatten(t *testing.T) {
@@ -330,35 +330,6 @@ package root2`,
 			},
 		},
 		{
-			note: "overlapping package paths",
-			modules: map[string]string{
-				"mod1": `# METADATA
-# title: TEST1
-package test`,
-				"mod2": `# METADATA
-# title: TEST2
-package test`,
-			},
-			expected: []AnnotationsRef{
-				{
-					Path:     MustParseRef("data.test"),
-					Location: &Location{File: "mod1", Row: 3},
-					Annotations: &Annotations{
-						Scope: "package",
-						Title: "TEST1",
-					},
-				},
-				{
-					Path:     MustParseRef("data.test"),
-					Location: &Location{File: "mod2", Row: 3},
-					Annotations: &Annotations{
-						Scope: "package",
-						Title: "TEST2",
-					},
-				},
-			},
-		},
-		{
 			note: "overlapping rule paths (same module)",
 			modules: map[string]string{
 				"mod": `package test
@@ -413,6 +384,37 @@ p[v] {v = 2}`,
 				},
 				{
 					Path:     MustParseRef("data.test.p"),
+					Location: &Location{File: "mod2", Row: 4},
+					Annotations: &Annotations{
+						Scope: "rule",
+						Title: "P2",
+					},
+				},
+			},
+		},
+		{
+			note: "overlapping rule paths (different modules, rule head refs)",
+			modules: map[string]string{
+				"mod1": `package test.a
+# METADATA
+# title: P1
+b.c.p[v] {v = 1}`,
+				"mod2": `package test
+# METADATA
+# title: P2
+a.b.c.p[v] {v = 2}`,
+			},
+			expected: []AnnotationsRef{
+				{
+					Path:     MustParseRef("data.test.a.b.c.p"),
+					Location: &Location{File: "mod1", Row: 4},
+					Annotations: &Annotations{
+						Scope: "rule",
+						Title: "P1",
+					},
+				},
+				{
+					Path:     MustParseRef("data.test.a.b.c.p"),
 					Location: &Location{File: "mod2", Row: 4},
 					Annotations: &Annotations{
 						Scope: "rule",
@@ -666,6 +668,94 @@ package root.foo`,
 
 # METADATA
 # title: BAR-other
+# description: This metadata is on the path of the queried rule, and should show up in the result even though it's in a different module.
+package root.foo.bar
+
+# METADATA
+# scope: document
+# description: document scope applied to rule in other module
+# title: P-doc
+p = 1`,
+				"rule": `package root.foo.bar
+
+# METADATA
+# title: P
+p = 1`,
+			},
+			moduleToAnalyze:     "rule",
+			ruleOnLineToAnalyze: 5,
+			expected: []AnnotationsRef{
+				{
+					Path:     MustParseRef("data.root.foo.bar.p"),
+					Location: &Location{File: "rule", Row: 5},
+					Annotations: &Annotations{
+						Scope: "rule",
+						Title: "P",
+					},
+				},
+				{
+					Path:     MustParseRef("data.root.foo.bar.p"),
+					Location: &Location{File: "root.foo.bar", Row: 15},
+					Annotations: &Annotations{
+						Scope:       "document",
+						Title:       "P-doc",
+						Description: "document scope applied to rule in other module",
+					},
+				},
+				{
+					Path:     MustParseRef("data.root.foo.bar"),
+					Location: &Location{File: "root.foo.bar", Row: 9},
+					Annotations: &Annotations{
+						Scope:       "package",
+						Title:       "BAR-other",
+						Description: "This metadata is on the path of the queried rule, and should show up in the result even though it's in a different module.",
+					},
+				},
+				{
+					Path:     MustParseRef("data.root.foo.bar"),
+					Location: &Location{File: "root.foo.bar", Row: 9},
+					Annotations: &Annotations{
+						Scope:       "subpackages",
+						Title:       "BAR-sub",
+						Description: "subpackages scope applied to rule in other module",
+					},
+				},
+				{
+					Path:     MustParseRef("data.root.foo"),
+					Location: &Location{File: "root.foo", Row: 4},
+					Annotations: &Annotations{
+						Scope: "subpackages",
+						Title: "FOO",
+					},
+				},
+				{
+					Path:     MustParseRef("data.root"),
+					Location: &Location{File: "root", Row: 4},
+					Annotations: &Annotations{
+						Scope: "subpackages",
+						Title: "ROOT",
+					},
+				},
+			},
+		},
+		{
+			note: "multiple subpackages, refs in rule heads", // NOTE(sr): same as above, but last module's rule is `foo.bar.p` in package `root`
+			modules: map[string]string{
+				"root": `# METADATA
+# scope: subpackages
+# title: ROOT
+package root`,
+				"root.foo": `# METADATA
+# title: FOO
+# scope: subpackages
+package root.foo`,
+				"root.foo.bar": `# METADATA
+# scope: subpackages
+# description: subpackages scope applied to rule in other module
+# title: BAR-sub
+
+# METADATA
+# title: BAR-other
 # description: This metadata is on the path of the queried rule, but shouldn't show up in the result as it's in a different module.
 package root.foo.bar
 
@@ -676,11 +766,11 @@ package root.foo.bar
 p = 1`,
 				"rule": `# METADATA
 # title: BAR
-package root.foo.bar
+package root
 
 # METADATA
 # title: P
-p = 1`,
+foo.bar.p = 1`,
 			},
 			moduleToAnalyze:     "rule",
 			ruleOnLineToAnalyze: 7,
@@ -703,28 +793,11 @@ p = 1`,
 					},
 				},
 				{
-					Path:     MustParseRef("data.root.foo.bar"),
+					Path:     MustParseRef("data.root"),
 					Location: &Location{File: "rule", Row: 3},
 					Annotations: &Annotations{
 						Scope: "package",
 						Title: "BAR",
-					},
-				},
-				{
-					Path:     MustParseRef("data.root.foo.bar"),
-					Location: &Location{File: "root.foo.bar", Row: 9},
-					Annotations: &Annotations{
-						Scope:       "subpackages",
-						Title:       "BAR-sub",
-						Description: "subpackages scope applied to rule in other module",
-					},
-				},
-				{
-					Path:     MustParseRef("data.root.foo"),
-					Location: &Location{File: "root.foo", Row: 4},
-					Annotations: &Annotations{
-						Scope: "subpackages",
-						Title: "FOO",
 					},
 				},
 				{
@@ -824,6 +897,7 @@ p = true`,
 			chain := as.Chain(rule)
 
 			if len(chain) != len(tc.expected) {
+				t.Errorf("expected %d elements, got %d:", len(tc.expected), len(chain))
 				t.Fatalf("chained AnnotationSet\n%v\n\ndoesn't match expected\n\n%v",
 					toJSON(chain), toJSON(tc.expected))
 			}
@@ -1022,7 +1096,7 @@ func TestAnnotations_toObject(t *testing.T) {
 }
 
 func toJSON(v interface{}) string {
-	b, _ := json.Marshal(v)
+	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b)
 }
 

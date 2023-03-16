@@ -6,9 +6,8 @@ package runtime
 
 import (
 	"bytes"
-	"context"
+	"compress/gzip"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/topdown/print"
-	"github.com/sirupsen/logrus"
 )
 
 type loggingPrintHook struct {
@@ -26,7 +24,7 @@ type loggingPrintHook struct {
 func (h loggingPrintHook) Print(pctx print.Context, msg string) error {
 	// NOTE(tsandall): if the request context is not present then do not panic,
 	// just log the print message without the additional context.
-	rctx, _ := pctx.Context.Value(reqCtxKey).(requestContext)
+	rctx, _ := logging.FromContext(pctx.Context)
 	fields := rctx.Fields()
 	fields["line"] = pctx.Location.String()
 	h.logger.WithFields(fields).Info(msg)
@@ -54,28 +52,8 @@ func (h *LoggingHandler) loggingEnabled(level logging.Level) bool {
 	return level <= h.logger.GetLevel()
 }
 
-type requestContextKey string
-
-const reqCtxKey = requestContextKey("request-context-key")
-
-type requestContext struct {
-	ClientAddr string
-	ReqID      uint64
-	ReqMethod  string
-	ReqPath    string
-}
-
-func (rctx requestContext) Fields() logrus.Fields {
-	return logrus.Fields{
-		"client_addr": rctx.ClientAddr,
-		"req_id":      rctx.ReqID,
-		"req_method":  rctx.ReqMethod,
-		"req_path":    rctx.ReqPath,
-	}
-}
-
 func (h *LoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var rctx requestContext
+	var rctx logging.RequestContext
 	rctx.ReqID = atomic.AddUint64(&h.requestID, uint64(1))
 	recorder := newRecorder(h.logger, w, r, rctx.ReqID, h.loggingEnabled(logging.Debug))
 	t0 := time.Now()
@@ -85,7 +63,7 @@ func (h *LoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rctx.ClientAddr = r.RemoteAddr
 		rctx.ReqMethod = r.Method
 		rctx.ReqPath = r.URL.EscapedPath()
-		r = r.WithContext(context.WithValue(r.Context(), reqCtxKey, rctx))
+		r = r.WithContext(logging.NewContext(r.Context(), &rctx))
 
 		var err error
 		fields := rctx.Fields()
@@ -96,8 +74,26 @@ func (h *LoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				bs, r.Body, err = readBody(r.Body)
 			}
 			if err == nil {
-				fields["req_body"] = string(bs)
-			} else {
+				if gzipReceived(r.Header) {
+					// the request is compressed
+					var gzReader *gzip.Reader
+					var plainOutput []byte
+					reader := bytes.NewReader(bs)
+					gzReader, err = gzip.NewReader(reader)
+					if err == nil {
+						plainOutput, err = io.ReadAll(gzReader)
+						if err == nil {
+							defer gzReader.Close()
+							fields["req_body"] = string(plainOutput)
+						}
+					}
+				} else {
+					fields["req_body"] = string(bs)
+				}
+			}
+
+			// err can be thrown on different statements
+			if err != nil {
 				fields["err"] = err
 			}
 
@@ -150,6 +146,21 @@ func (h *LoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// metrics endpoint does so when the client accepts it (e.g. prometheus)
 				fields["resp_body"] = "[compressed payload]"
 
+			case gzipAccepted(r.Header) && gzipReceived(w.Header()) && (isDataEndpoint(r) || isCompileEndpoint(r)):
+				// data and compile endpoints might compress the response
+				gzReader, gzErr := gzip.NewReader(recorder.buf)
+				if gzErr == nil {
+					plainOutput, readErr := io.ReadAll(gzReader)
+					if readErr == nil {
+						defer gzReader.Close()
+						fields["resp_body"] = string(plainOutput)
+					} else {
+						h.logger.Error("Failed to decompressed the payload: %v", readErr.Error())
+					}
+				} else {
+					h.logger.Error("Failed to read the compressed payload: %v", gzErr.Error())
+				}
+
 			default:
 				fields["resp_body"] = recorder.buf.String()
 			}
@@ -171,12 +182,32 @@ func gzipAccepted(header http.Header) bool {
 	return false
 }
 
+func gzipReceived(header http.Header) bool {
+	a := header.Get("Content-Encoding")
+	parts := strings.Split(a, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "gzip" || strings.HasPrefix(part, "gzip;") {
+			return true
+		}
+	}
+	return false
+}
+
 func isPprofEndpoint(req *http.Request) bool {
 	return strings.HasPrefix(req.URL.Path, "/debug/pprof/")
 }
 
 func isMetricsEndpoint(req *http.Request) bool {
 	return strings.HasPrefix(req.URL.Path, "/metrics")
+}
+
+func isDataEndpoint(req *http.Request) bool {
+	return strings.HasPrefix(req.URL.Path, "/v1/data") || strings.HasPrefix(req.URL.Path, "/v0/data")
+}
+
+func isCompileEndpoint(req *http.Request) bool {
+	return strings.HasPrefix(req.URL.Path, "/v1/compile")
 }
 
 type recorder struct {
@@ -229,5 +260,5 @@ func readBody(r io.ReadCloser) ([]byte, io.ReadCloser, error) {
 	if _, err := buf.ReadFrom(r); err != nil {
 		return nil, r, err
 	}
-	return buf.Bytes(), ioutil.NopCloser(bytes.NewReader(buf.Bytes())), nil
+	return buf.Bytes(), io.NopCloser(bytes.NewReader(buf.Bytes())), nil
 }
