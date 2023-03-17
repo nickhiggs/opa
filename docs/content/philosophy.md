@@ -132,7 +132,7 @@ into OPA when the state of the world changes. This can happen periodically or wh
 event (like a database change notification) occurs. Base documents loaded asynchronously
 are always accessed under the `data` global variable. On the other hand, base documents can
 also be pushed or pulled into OPA _synchronously_ when your software queries OPA for policy
-decisions. We say refer to base documents pushed synchronously as "input". Policies can
+decisions. We refer to base documents pushed synchronously as "input". Policies can
 access these inputs under the `input` global variable. To pull base documents during
 policy evaluation, OPA exposes (and can be extended with custom) built-in functions like
 `http.send`. Built-in function return values can be assigned to local variables and
@@ -151,7 +151,7 @@ how they can be referenced inside of policies, and the actual mechanism(s) for l
 
 Data loaded asynchronously into OPA is cached in-memory so that it can be read efficiently
 during policy evaluation. Similarly, policies are also cached in-memory to ensure
-high-performance and and high-availability. Data _pulled_ synchronously can also be
+high-performance and high-availability. Data _pulled_ synchronously can also be
 cached in-memory. For more information on loading external data into OPA, including tradeoffs,
 see the [External Data](../external-data) page.
 

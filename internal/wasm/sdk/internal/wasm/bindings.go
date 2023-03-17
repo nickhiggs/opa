@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go"
+	wasmtime "github.com/bytecodealliance/wasmtime-go/v3"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/metrics"
@@ -85,6 +85,7 @@ func (d *builtinDispatcher) Reset(ctx context.Context,
 	seed io.Reader,
 	ns time.Time,
 	iqbCache cache.InterQueryCache,
+	ndbCache builtins.NDBCache,
 	ph print.Hook,
 	capabilities *ast.Capabilities) {
 	if ns.IsZero() {
@@ -107,6 +108,7 @@ func (d *builtinDispatcher) Reset(ctx context.Context,
 		QueryID:                0,
 		ParentID:               0,
 		InterQueryBuiltinCache: iqbCache,
+		NDBuiltinCache:         ndbCache,
 		PrintHook:              ph,
 		Capabilities:           capabilities,
 	}

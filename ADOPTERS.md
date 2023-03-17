@@ -6,6 +6,9 @@
 This is a list of organizations that have spoken publicly about their adoption or
 production users that have added themselves (in alphabetical order):
 
+* [2U, Inc](https://2u.com) has incorporated OPA into their SDLC for both Terraform and Kubernetes deployments.
+  Shift left!
+
 * [Appsflyer](https://www.appsflyer.com/) uses OPA to make consistent
   authorization decisions by hundreds of microservices for UI and API data
   access. All authorization decisions are delegated to OPA that is deployed as a
@@ -72,6 +75,11 @@ production users that have added themselves (in alphabetical order):
   OPA-based admission controllers, covering single-tenant environments and hard
   multi-tenancy configurations.
 
+* [Digraph](https://www.getdigraph.com) is a developer-first cloud compliance platform
+  that uses OPA to let security teams detect and resolve non-compliant infrastructure
+  changes before they're deployed to production, and produce audit trails to eliminate
+  manual work and accelerate audit processes like SOC and ISO.
+
 * [Fugue](https://fugue.co) is a cloud security SaaS that uses OPA to
   classify compliance violations and security risks in AWS and Azure
   accounts and generate compliance reports and notifications.
@@ -80,6 +88,19 @@ production users that have added themselves (in alphabetical order):
   policies in their multi-tenant Kubernetes clusters as well as for _provisioning_
   RBAC, PV, and Quota resources that are central to the security and operation of
   these clusters. For more information see this talk from [KubeCon US 2019](https://www.youtube.com/watch?v=lYHr_UaHsYQ).
+
+* [Google Cloud](https://cloud.google.com/) uses OPA to validate Google Cloud
+  product's configurations in several products and tools, including
+  [Anthos Config Management](https://cloud.google.com/anthos/config-management),
+  [GKE Policy Automation](https://github.com/google/gke-policy-automation) or
+  [Config Validator](https://github.com/GoogleCloudPlatform/policy-library). See
+  [Creating policy-compliant Google Cloud resources article](https://cloud.google.com/architecture/policy-compliant-resources)
+  for example use cases.
+
+* [Infracost](https://www.infracost.io/) shows cloud cost estimates for Terraform.
+  It uses OPA to enable users to create cost policies, and setup guardrails such
+  as "this change puts the monthly costs above $10K, which is the budget for this
+  product. Consider asking the team lead to review it". See [the docs](https://www.infracost.io/docs/features/cost_policies/) for details.
 
 * [Intuit](https://www.intuit.com/company/) uses OPA as a validating
   and mutating admission controller to implement various security,
@@ -142,6 +163,8 @@ production users that have added themselves (in alphabetical order):
   etc. SAP/Infrabox is used in production within SAP and has several
   external users.
 
+* [Terminus Software](https://terminus.com/) uses OPA for microservice authorization.
+
 * [T-Mobile](https://www.t-mobile.com) uses OPA as a core component for their
   [MagTape](https://github.com/tmobile/magtape/) project that enforces best
   practices and secure configurations across their fleet of Kubernetes
@@ -175,6 +198,18 @@ production users that have added themselves (in alphabetical order):
   [part 1](https://blog.verygoodsecurity.com/posts/building-a-fine-grained-permission-system-in-a-distributed-environment),
   [part 2](https://blog.verygoodsecurity.com/posts/building-a-fine-grained-permissions-system-in-a-distributed-environment).
 
+* [VNG Cloud](https://www.vngcloud.vn/en/home) [Identity and Access Management (IAM)](https://iam.vngcloud.vn/)
+  use OPA as a policy-based decision engine for authorization. IAM provides administrators with fine-grained 
+  access control to VNG Cloud resources and help centralize and manage permissions to access resources. 
+  Specifically, OPA is integrated to evaluate policies to make the decision about denying or allowing incoming requests.
+  
+* [Wiz](https://www.wiz.io/) helps every organization rapidly remove the most critical
+  risks in their cloud estate. It simply connects in minutes, requires zero agents, and
+  automatically correlates the entire security stack to uncover the most pressing issues.
+  Wiz policies leverage Open Policy Agent (OPA) for a unified framework across the
+  cloud-native stack. Whether for configurations, compliance, IaC, and more, OPA enables
+  teams to move faster in the cloud. For more information on how Wiz uses OPA, [contact Wiz](https://www.wiz.io/contact/).
+
 * [Xenit AB](https://www.xenit.se/) uses OPA to implement fine-grained control
   over resource formulation in its managed Kubernetes service as well as several
   customer-specific implementations. For more information, see the Kubernetes Terraform library [OPA Gatekeeper module](https://github.com/XenitAB/terraform-modules/tree/main/modules/kubernetes/opa-gatekeeper) and
@@ -183,7 +218,7 @@ production users that have added themselves (in alphabetical order):
 * [Yelp](https://www.yelp.com/) use OPA and Envoy to enforce authorization policies
   across a fleet of microservices that evolved out of a monolithic architecture.
   For more information see this talk from [KubeCon US 2019](https://www.youtube.com/watch?v=Z6aN3Smt-9M).
-
+  
 In addition, there are several production adopters that prefer to
 remain anonymous.
 
@@ -237,6 +272,10 @@ pre-production (in alphabetical order):
   automated code review, defining access levels or blocking execution of
   unwanted code.
 
+* [Wealthsimple](https://www.wealthsimple.com/) is using OPA to power all authorization checks their microservice ecosystem by leveraging their existing authorization library make the transition to OPA as simple as possible for development teams.
+
+* [Magda](https://github.com/magda-io/magda) is a federated, Kubernetes-based, open-source data catalog system. Working as Magda's central authorisation policy engine, OPA helps not only the API endpoint authorisation. Magda also uses its partial evaluation feature to translate datasets authorisation decisions to other database-specific DSLs (e.g. SQL or Elasticsearch DSL) and use them for dataset authorisation enforcement in different databases.
+
 Other adopters that have gone into production or various stages of
 testing include:
 
@@ -246,4 +285,5 @@ testing include:
 * [State Street Corporation](http://www.statestreet.com/)
 
 If you have adopted OPA and would like to be included in this list,
-feel free to submit a PR.
+feel free to submit a PR updating this file or
+[open an issue](https://github.com/open-policy-agent/opa/issues/new?assignees=&labels=adopt-opa&template=adopt-opa.yaml&title=organization_name+has+adopted+OPA).

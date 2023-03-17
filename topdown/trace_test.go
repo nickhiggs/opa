@@ -14,7 +14,7 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/util"
 )
 
@@ -109,7 +109,7 @@ Redo data.test.p = _
 `
 
 	var buf bytes.Buffer
-	PrettyTrace(&buf, *tracer)
+	PrettyTrace(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -169,7 +169,7 @@ query:3     | | Redo data.test.q[x]
 `
 
 	var buf bytes.Buffer
-	PrettyTraceWithLocation(&buf, *tracer)
+	PrettyTraceWithLocation(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -236,7 +236,7 @@ authz_bundle/...ternal/authz/policies/abac/v1/beta/policy.rego:5     | | Redo da
 `
 
 	var buf bytes.Buffer
-	PrettyTraceWithLocation(&buf, *tracer)
+	PrettyTraceWithLocation(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -401,7 +401,7 @@ query:1                                                              | Fail data
 `
 
 	var buf bytes.Buffer
-	PrettyTraceWithLocation(&buf, *tracer)
+	PrettyTraceWithLocation(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -511,7 +511,7 @@ Redo data.test.p = _
 `
 
 	var buf bytes.Buffer
-	PrettyTrace(&buf, *tracer)
+	PrettyTrace(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -576,7 +576,7 @@ query:3     | | Redo data.test.q[x]
 `
 
 	var buf bytes.Buffer
-	PrettyTraceWithLocation(&buf, *tracer)
+	PrettyTraceWithLocation(&buf, removeUnifyOps(*tracer))
 	compareBuffers(t, expected, buf.String())
 }
 
@@ -1152,4 +1152,150 @@ func compareBuffers(t *testing.T, expected, actual string) {
 		fmt.Println("Trace output:")
 		fmt.Println(actual)
 	}
+}
+
+func TestPrettyTraceWithLocationForMetadataCall(t *testing.T) {
+	module := `package test
+rule_no_output_var := rego.metadata.rule()
+
+rule_with_output_var {
+	foo := rego.metadata.rule()
+	foo == {}
+}
+
+chain_no_output_var := rego.metadata.chain()
+
+chain_with_output_var {
+	foo := rego.metadata.chain()
+	foo == []
+}`
+
+	ctx := context.Background()
+	compiler := compileModules([]string{module})
+	data := loadSmallTestData()
+	store := inmem.NewFromObject(data)
+	txn := storage.NewTransactionOrDie(ctx, store)
+	defer store.Abort(ctx, txn)
+
+	tracer := NewBufferTracer()
+	query := NewQuery(ast.MustParseBody("data.test = _")).
+		WithCompiler(compiler).
+		WithStore(store).
+		WithTransaction(txn).
+		WithTracer(tracer)
+
+	_, err := query.Run(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	expected := `query:1      Enter data.test = _
+query:1      | Eval data.test = _
+query:1      | Index data.test.chain_no_output_var (matched 1 rule)
+query:9      | Enter data.test.chain_no_output_var
+query:9      | | Eval __local8__ = [{"path": ["test", "chain_no_output_var"]}]
+query:9      | | Eval true
+query:9      | | Eval __local4__ = __local8__
+query:9      | | Exit data.test.chain_no_output_var
+query:9      | Redo data.test.chain_no_output_var
+query:9      | | Redo __local4__ = __local8__
+query:9      | | Redo true
+query:9      | | Redo __local8__ = [{"path": ["test", "chain_no_output_var"]}]
+query:1      | Index data.test.chain_with_output_var (matched 1 rule, early exit)
+query:11     | Enter data.test.chain_with_output_var
+query:12     | | Eval __local9__ = [{"path": ["test", "chain_with_output_var"]}]
+query:12     | | Eval __local5__ = __local9__
+query:12     | | Eval foo = __local5__
+query:13     | | Eval foo = []
+query:13     | | Fail foo = []
+query:12     | | Redo foo = __local5__
+query:12     | | Redo __local5__ = __local9__
+query:12     | | Redo __local9__ = [{"path": ["test", "chain_with_output_var"]}]
+query:1      | Index data.test.rule_no_output_var (matched 1 rule)
+query:2      | Enter data.test.rule_no_output_var
+query:2      | | Eval __local6__ = {}
+query:2      | | Eval true
+query:2      | | Eval __local2__ = __local6__
+query:2      | | Exit data.test.rule_no_output_var
+query:2      | Redo data.test.rule_no_output_var
+query:2      | | Redo __local2__ = __local6__
+query:2      | | Redo true
+query:2      | | Redo __local6__ = {}
+query:1      | Index data.test.rule_with_output_var (matched 1 rule, early exit)
+query:4      | Enter data.test.rule_with_output_var
+query:5      | | Eval __local7__ = {}
+query:5      | | Eval __local3__ = __local7__
+query:5      | | Eval foo = __local3__
+query:6      | | Eval foo = {}
+query:4      | | Exit data.test.rule_with_output_var early
+query:4      | Redo data.test.rule_with_output_var
+query:6      | | Redo foo = {}
+query:5      | | Redo foo = __local3__
+query:5      | | Redo __local3__ = __local7__
+query:5      | | Redo __local7__ = {}
+query:1      | Exit data.test = _
+query:1      Redo data.test = _
+query:1      | Redo data.test = _
+`
+
+	var buf bytes.Buffer
+	PrettyTraceWithLocation(&buf, removeUnifyOps(*tracer))
+	compareBuffers(t, expected, buf.String())
+}
+
+func TestPrettyTraceWithUnifyOps(t *testing.T) {
+	module := `package test
+
+	p[x] {
+		x = 1
+	}`
+
+	ctx := context.Background()
+	compiler := compileModules([]string{module})
+	store := inmem.NewFromObject(nil)
+	txn := storage.NewTransactionOrDie(ctx, store)
+	defer store.Abort(ctx, txn)
+
+	tracer := NewBufferTracer()
+	query := NewQuery(ast.MustParseBody("data.test.p")).
+		WithCompiler(compiler).
+		WithStore(store).
+		WithTransaction(txn).
+		WithTracer(tracer)
+
+	_, err := query.Run(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	expected := `query:1     Enter data.test.p
+query:1     | Eval data.test.p
+query:1     | Unify data.test.p = _
+query:1     | Index data.test.p (matched 1 rule)
+query:3     | Enter data.test.p
+query:4     | | Eval x = 1
+query:4     | | Unify x = 1
+query:3     | | Exit data.test.p
+query:3     | Redo data.test.p
+query:4     | | Redo x = 1
+query:1     | Unify {1} = _
+query:1     | Exit data.test.p
+query:1     Redo data.test.p
+query:1     | Redo data.test.p
+`
+
+	var buf bytes.Buffer
+	PrettyTraceWithLocation(&buf, *tracer)
+	compareBuffers(t, expected, buf.String())
+}
+
+// removeUnifyOps removes all UnifyOp events from a trace, since this is
+// too verbose to test everywhere.
+func removeUnifyOps(trace []*Event) (result []*Event) {
+	for _, event := range trace {
+		if event.Op != UnifyOp {
+			result = append(result, event)
+		}
+	}
+	return
 }

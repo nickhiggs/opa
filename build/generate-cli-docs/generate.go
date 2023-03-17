@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,7 +35,7 @@ func main() {
 	command.Use = "opa [command]"
 	command.DisableAutoGenTag = true
 
-	dir, err := ioutil.TempDir("", "opa")
+	dir, err := os.MkdirTemp("", "opa")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,7 +46,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,13 +71,14 @@ func main() {
 	}
 
 	heading := regexp.MustCompile(`^[\\-]+$`)
-	var document []string
+	lines := strings.Split(builder.String(), "\n")
+	document := make([]string, 0, len(lines))
 	removed := 0
 
 	// The document may contain "----" for headings, which will be converted to h1
 	// elements in markdown. This is undesirable, so let's remove them and prepend
 	// the line before that with ### to instead create a h3
-	for line, str := range strings.Split(builder.String(), "\n") {
+	for line, str := range lines {
 		if heading.Match([]byte(str)) {
 			document[line-1-removed] = fmt.Sprintf("### %s\n", document[line-1-removed])
 			removed++
@@ -88,7 +88,7 @@ func main() {
 	}
 
 	withHeader := fmt.Sprintf("%s%s", fileHeader, strings.Join(document, ""))
-	err = ioutil.WriteFile(filepath.Join(out, "cli.md"), []byte(withHeader), 0755)
+	err = os.WriteFile(filepath.Join(out, "cli.md"), []byte(withHeader), 0755)
 	if err != nil {
 		log.Fatal(err)
 	}

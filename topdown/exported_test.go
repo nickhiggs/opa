@@ -2,13 +2,6 @@
 // Use of this source code is governed by an Apache2
 // license that can be found in the LICENSE file.
 
-// NOTE(sr): x509-related errors that we assert in the exported tests looked different
-// before go1.17. Since they are still (non-strict) errors in both cases, we'll skip
-// running the exported tests on go1.16.
-// This can be removed when we drop support for go 1.16.
-//go:build !go1.16
-// +build !go1.16
-
 package topdown
 
 import (
@@ -21,8 +14,9 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/test/cases"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 )
 
 func TestRego(t *testing.T) {
@@ -41,7 +35,19 @@ func TestOPARego(t *testing.T) {
 	}
 }
 
-func testRun(t *testing.T, tc cases.TestCase) {
+func TestRegoWithNDBCache(t *testing.T) {
+	for _, tc := range cases.MustLoad("../test/cases/testdata").Sorted().Cases {
+		t.Run(tc.Note, func(t *testing.T) {
+			testRun(t, tc, func(q *Query) *Query {
+				return q.WithNDBuiltinCache(builtins.NDBCache{})
+			})
+		})
+	}
+}
+
+type opt func(*Query) *Query
+
+func testRun(t *testing.T, tc cases.TestCase, opts ...opt) {
 
 	ctx := context.Background()
 
@@ -76,14 +82,19 @@ func testRun(t *testing.T, tc cases.TestCase) {
 	}
 
 	buf := NewBufferTracer()
-	rs, err := NewQuery(query).
+	q := NewQuery(query).
 		WithCompiler(compiler).
 		WithStore(store).
 		WithTransaction(txn).
 		WithInput(input).
 		WithStrictBuiltinErrors(tc.StrictError).
-		WithTracer(buf).
-		Run(ctx)
+		WithTracer(buf)
+
+	for _, o := range opts {
+		q = o(q)
+	}
+
+	rs, err := q.Run(ctx)
 
 	if tc.WantError != nil {
 		testAssertErrorText(t, *tc.WantError, err)

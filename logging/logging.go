@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"io"
 
 	"github.com/sirupsen/logrus"
@@ -87,8 +88,8 @@ func (l *StandardLogger) getFields() map[string]interface{} {
 func (l *StandardLogger) SetLevel(level Level) {
 	var logrusLevel logrus.Level
 	switch level {
-	case Error:
-		logrusLevel = logrus.ErrorLevel
+	case Error: // set logging level report Warn or higher (includes Error)
+		logrusLevel = logrus.WarnLevel
 	case Warn:
 		logrusLevel = logrus.WarnLevel
 	case Info:
@@ -109,10 +110,8 @@ func (l *StandardLogger) GetLevel() Level {
 
 	var level Level
 	switch logrusLevel {
-	case logrus.ErrorLevel:
-		level = Error
 	case logrus.WarnLevel:
-		level = Warn
+		level = Error
 	case logrus.InfoLevel:
 		level = Info
 	case logrus.DebugLevel:
@@ -142,7 +141,7 @@ func (l *StandardLogger) Error(fmt string, a ...interface{}) {
 
 // Warn logs at warn level
 func (l *StandardLogger) Warn(fmt string, a ...interface{}) {
-	l.logger.WithFields(l.getFields()).Errorf(fmt, a...)
+	l.logger.WithFields(l.getFields()).Warnf(fmt, a...)
 }
 
 // NoOpLogger logging implementation that does nothing
@@ -186,4 +185,49 @@ func (l *NoOpLogger) SetLevel(level Level) {
 // GetLevel get log level
 func (l *NoOpLogger) GetLevel() Level {
 	return l.level
+}
+
+type requestContextKey string
+
+const reqCtxKey = requestContextKey("request-context-key")
+
+// RequestContext represents the request context used to store data
+// related to the request that could be used on logs.
+type RequestContext struct {
+	ClientAddr string
+	ReqID      uint64
+	ReqMethod  string
+	ReqPath    string
+}
+
+// Fields adapts the RequestContext fields to logrus.Fields.
+func (rctx RequestContext) Fields() logrus.Fields {
+	return logrus.Fields{
+		"client_addr": rctx.ClientAddr,
+		"req_id":      rctx.ReqID,
+		"req_method":  rctx.ReqMethod,
+		"req_path":    rctx.ReqPath,
+	}
+}
+
+// NewContext returns a copy of parent with an associated RequestContext.
+func NewContext(parent context.Context, val *RequestContext) context.Context {
+	return context.WithValue(parent, reqCtxKey, val)
+}
+
+// FromContext returns the RequestContext associated with ctx, if any.
+func FromContext(ctx context.Context) (*RequestContext, bool) {
+	requestContext, ok := ctx.Value(reqCtxKey).(*RequestContext)
+	return requestContext, ok
+}
+
+const decisionCtxKey = requestContextKey("decision_id")
+
+func WithDecisionID(parent context.Context, id string) context.Context {
+	return context.WithValue(parent, decisionCtxKey, id)
+}
+
+func DecisionIDFromContext(ctx context.Context) (string, bool) {
+	s, ok := ctx.Value(decisionCtxKey).(string)
+	return s, ok
 }

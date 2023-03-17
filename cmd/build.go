@@ -27,6 +27,7 @@ type buildParams struct {
 	capabilities       *capabilitiesFlag
 	target             *util.EnumFlag
 	bundleMode         bool
+	pruneUnused        bool
 	optimizationLevel  int
 	entrypoints        repeatedStringFlag
 	outputFile         string
@@ -108,15 +109,23 @@ The 'build' command supports targets (specified by -t):
     rego    The default target emits a bundle containing a set of policy and data files
             that are semantically equivalent to the input files. If optimizations are
             disabled the output may simply contain a copy of the input policy and data
-            files. If optimization is enabled at least one entrypoint (-e) must be supplied.
+            files. If optimization is enabled at least one entrypoint must be supplied,
+            either via the -e option, or via entrypoint metadata annotations.
 
     wasm    The wasm target emits a bundle containing a WebAssembly module compiled from
             the input files for each specified entrypoint. The bundle may contain the
             original policy or data files.
 
-The -e flag tells the 'build' command which documents will be queried by the software
-asking for policy decisions, so that it can focus optimization efforts and ensure
-that document is not eliminated by the optimizer.
+    plan    The plan target emits a bundle containing a plan, i.e., an intermediate
+            representation compiled from the input files for each specified entrypoint.
+            This is for further processing, OPA cannot evaluate a "plan bundle" like it
+            can evaluate a wasm or rego bundle.
+
+The -e flag tells the 'build' command which documents (entrypoints) will be queried by 
+the software asking for policy decisions, so that it can focus optimization efforts and 
+ensure that document is not eliminated by the optimizer.
+Note: Unless the --prune-unused flag is used, any rule transitively referring to a 
+package or rule declared as an entrypoint will also be enumerated as an entrypoint.
 
 Signing
 -------
@@ -201,7 +210,7 @@ The OPA repository contains a set of capabilities files for each OPA release. Fo
 the following command builds a directory of policies ('./policies') and validates them
 against OPA v0.22.0:
 
-    opa build ./policies --capabilities $OPA_SRC/capabilities/v0.22.0.json
+    opa build ./policies --capabilities v0.22.0
 `,
 		PreRunE: func(Cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -218,7 +227,8 @@ against OPA v0.22.0:
 	}
 
 	buildCommand.Flags().VarP(buildParams.target, "target", "t", "set the output bundle target type")
-	buildCommand.Flags().BoolVarP(&buildParams.debug, "debug", "", false, "enable debug output")
+	buildCommand.Flags().BoolVar(&buildParams.pruneUnused, "prune-unused", false, "exclude dependents of entrypoints")
+	buildCommand.Flags().BoolVar(&buildParams.debug, "debug", false, "enable debug output")
 	buildCommand.Flags().IntVarP(&buildParams.optimizationLevel, "optimize", "O", 0, "set optimization level")
 	buildCommand.Flags().VarP(&buildParams.entrypoints, "entrypoint", "e", "set slash separated entrypoint path")
 	buildCommand.Flags().VarP(&buildParams.revision, "revision", "r", "set output bundle revision")
@@ -253,13 +263,15 @@ func dobuild(params buildParams, args []string) error {
 		return err
 	}
 
-	bsc := buildSigningConfig(params.key, params.algorithm, params.claimsFile, params.plugin)
-
-	if bvc != nil || bsc != nil {
-		if !params.bundleMode {
-			return fmt.Errorf("enable bundle mode (ie. --bundle) to verify or sign bundle files or directories")
-		}
+	bsc, err := buildSigningConfig(params.key, params.algorithm, params.claimsFile, params.plugin)
+	if err != nil {
+		return err
 	}
+
+	if (bvc != nil || bsc != nil) && !params.bundleMode {
+		return fmt.Errorf("enable bundle mode (ie. --bundle) to verify or sign bundle files or directories")
+	}
+
 	var capabilities *ast.Capabilities
 	// if capabilities are not provided as a cmd flag,
 	// then ast.CapabilitiesForThisVersion must be called
@@ -269,13 +281,16 @@ func dobuild(params buildParams, args []string) error {
 	} else {
 		capabilities = ast.CapabilitiesForThisVersion()
 	}
+
 	compiler := compile.New().
 		WithCapabilities(capabilities).
 		WithTarget(params.target.String()).
 		WithAsBundle(params.bundleMode).
+		WithPruneUnused(params.pruneUnused).
 		WithOptimizationLevel(params.optimizationLevel).
 		WithOutput(buf).
 		WithEntrypoints(params.entrypoints.v...).
+		WithRegoAnnotationEntrypoints(true).
 		WithPaths(args...).
 		WithFilter(buildCommandLoaderFilter(params.bundleMode, params.ignore)).
 		WithBundleVerificationConfig(bvc).
@@ -291,6 +306,10 @@ func dobuild(params buildParams, args []string) error {
 
 	if params.claimsFile == "" {
 		compiler = compiler.WithBundleVerificationKeyID(params.pubKeyID)
+	}
+
+	if params.target.String() == compile.TargetPlan {
+		compiler = compiler.WithEnablePrintStatements(true)
 	}
 
 	err = compiler.Build(context.Background())
@@ -334,10 +353,12 @@ func buildVerificationConfig(pubKey, pubKeyID, alg, scope string, excludeFiles [
 	return bundle.NewVerificationConfig(map[string]*keys.Config{pubKeyID: keyConfig}, pubKeyID, scope, excludeFiles), nil
 }
 
-func buildSigningConfig(key, alg, claimsFile, plugin string) *bundle.SigningConfig {
-	if key == "" {
-		return nil
+func buildSigningConfig(key, alg, claimsFile, plugin string) (*bundle.SigningConfig, error) {
+	if key == "" && (plugin != "" || claimsFile != "") {
+		return nil, errSigningConfigIncomplete
 	}
-
-	return bundle.NewSigningConfig(key, alg, claimsFile).WithPlugin(plugin)
+	if key == "" {
+		return nil, nil
+	}
+	return bundle.NewSigningConfig(key, alg, claimsFile).WithPlugin(plugin), nil
 }

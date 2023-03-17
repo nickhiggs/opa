@@ -7,7 +7,7 @@ package format
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,7 +60,7 @@ func TestFormatNilLocationFunctionArgs(t *testing.T) {
 
 func TestFormatSourceError(t *testing.T) {
 	rego := "testfiles/test.rego.error"
-	contents, err := ioutil.ReadFile(rego)
+	contents, err := os.ReadFile(rego)
 	if err != nil {
 		t.Fatalf("Failed to read rego source: %v", err)
 	}
@@ -85,12 +85,12 @@ func TestFormatSource(t *testing.T) {
 
 	for _, rego := range regoFiles {
 		t.Run(rego, func(t *testing.T) {
-			contents, err := ioutil.ReadFile(rego)
+			contents, err := os.ReadFile(rego)
 			if err != nil {
 				t.Fatalf("Failed to read rego source: %v", err)
 			}
 
-			expected, err := ioutil.ReadFile(rego + ".formatted")
+			expected, err := os.ReadFile(rego + ".formatted")
 			if err != nil {
 				t.Fatalf("Failed to read expected rego source: %v", err)
 			}
@@ -274,7 +274,7 @@ p {
 
 import future.keywords
 
-p {
+p if {
 	every k, v in [1, 2] { k != v }
 }`,
 		},
@@ -290,7 +290,7 @@ p {
 
 import future.keywords
 
-p {
+p if {
 	every k, v in [1, 2] { k != v }
 }`,
 		},
@@ -455,6 +455,17 @@ a[_x[y][[z, w]]]`,
 			actual := strings.TrimSpace(string(bs))
 			if actual != expected {
 				t.Fatalf("Expected:\n\n%q\n\nGot:\n\n%q\n\n", expected, actual)
+			}
+		})
+
+		// consistency check: disregarding source locations, it shouldn't panic
+		t.Run("no_loc/"+tc.note, func(t *testing.T) {
+			_, err := AstWithOpts(tc.toFmt, Opts{IgnoreLocations: true})
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
+			}
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
 			}
 		})
 	}

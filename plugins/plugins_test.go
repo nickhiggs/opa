@@ -11,14 +11,14 @@ import (
 	"reflect"
 	"testing"
 
-	prom "github.com/prometheus/client_golang/prometheus"
-
+	internal_tracing "github.com/open-policy-agent/opa/internal/distributedtracing"
 	"github.com/open-policy-agent/opa/internal/storage/mock"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/plugins/rest"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/topdown/cache"
+	prom "github.com/prometheus/client_golang/prometheus"
 )
 
 func TestManagerCacheTriggers(t *testing.T) {
@@ -42,6 +42,44 @@ func TestManagerCacheTriggers(t *testing.T) {
 	})
 
 	if m.registeredCacheTriggers[0] == nil || m.registeredCacheTriggers[1] == nil {
+		t.Fatal("Second listener failed to register")
+	}
+
+	if l1Called == true || l2Called == true {
+		t.Fatal("Listeners should not be called yet")
+	}
+
+	err = m.Reconfigure(m.Config)
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	if l1Called == false || l2Called == false {
+		t.Fatal("Listeners should hav been called")
+	}
+}
+
+func TestManagerNDCacheTriggers(t *testing.T) {
+	m, err := New([]byte{}, "test", inmem.New())
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	l1Called := false
+	m.RegisterNDCacheTrigger(func(bool) {
+		l1Called = true
+	})
+
+	if m.registeredNDCacheTriggers[0] == nil {
+		t.Fatal("First listener failed to register")
+	}
+
+	l2Called := false
+	m.RegisterNDCacheTrigger(func(bool) {
+		l2Called = true
+	})
+
+	if m.registeredNDCacheTriggers[0] == nil || m.registeredNDCacheTriggers[1] == nil {
 		t.Fatal("Second listener failed to register")
 	}
 
@@ -257,6 +295,24 @@ func TestManagerWithCachingConfig(t *testing.T) {
 	}
 }
 
+func TestManagerWithNDCachingConfig(t *testing.T) {
+	m, err := New([]byte(`{"nd_builtin_cache": true}`), "test", inmem.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := true
+	if !m.Config.NDBuiltinCache == expected {
+		t.Fatalf("want %+v got %+v", expected, m.Config.NDBuiltinCache)
+	}
+
+	// config error
+	_, err = New([]byte(`{"nd_builtin_cache": "x"}`), "test", inmem.New())
+	if err == nil {
+		t.Fatal("expected error but got nil")
+	}
+}
+
 type mockForInitStartOrdering struct {
 	Manager *Manager
 	Started bool
@@ -358,6 +414,20 @@ func TestPluginManagerPrometheusRegister(t *testing.T) {
 	}
 }
 
+func TestPluginManagerTracerProvider(t *testing.T) {
+	_, tracerProvider, err := internal_tracing.Init(context.TODO(), []byte(`{ "distributed_tracing": { "type": "grpc" } }`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := New([]byte(`{}`), "test", inmem.New(), WithTracerProvider(tracerProvider))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.TracerProvider() != tracerProvider {
+		t.Fatal("TracerProvider was not configured on plugin manager")
+	}
+}
 func TestPluginManagerServerInitialized(t *testing.T) {
 	// Verify that ServerInitializedChannel is closed when
 	// ServerInitialized is called.

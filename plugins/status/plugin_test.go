@@ -20,9 +20,11 @@ import (
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
 	"github.com/open-policy-agent/opa/plugins/bundle"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/version"
+
+	lstat "github.com/open-policy-agent/opa/plugins/logs/status"
 )
 
 func TestMain(m *testing.M) {
@@ -464,6 +466,49 @@ func TestPluginStartDiscovery(t *testing.T) {
 	}
 }
 
+func TestPluginStartDecisionLogs(t *testing.T) {
+
+	fixture := newTestFixture(t, nil)
+	fixture.server.ch = make(chan UpdateRequestV1)
+	defer fixture.server.stop()
+
+	ctx := context.Background()
+
+	err := fixture.plugin.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.plugin.Stop(ctx)
+
+	// Ignore the plugin updating its status (tested elsewhere)
+	<-fixture.server.ch
+
+	status := &lstat.Status{
+		Code:     "decision_log_error",
+		Message:  "Upload Failed",
+		HTTPCode: "400",
+	}
+
+	fixture.plugin.UpdateDecisionLogsStatus(*status)
+	result := <-fixture.server.ch
+
+	exp := UpdateRequestV1{
+		Labels: map[string]string{
+			"id":      "test-instance-id",
+			"app":     "example-app",
+			"version": version.Version,
+		},
+		DecisionLogs: status,
+		Plugins: map[string]*plugins.Status{
+			"status": {State: plugins.StateOK},
+		},
+	}
+
+	if !reflect.DeepEqual(result, exp) {
+		t.Fatalf("Expected: %+v but got: %+v", exp, result)
+	}
+}
+
 func TestPluginBadAuth(t *testing.T) {
 	fixture := newTestFixture(t, nil)
 	ctx := context.Background()
@@ -473,6 +518,9 @@ func TestPluginBadAuth(t *testing.T) {
 	err := fixture.plugin.oneShot(ctx)
 	if err == nil {
 		t.Fatal("Expected error")
+	}
+	if err.Error() != "status update failed, server replied with HTTP 401 Unauthorized" {
+		t.Fatalf("Unexpected error contents: %v", err)
 	}
 }
 
@@ -486,6 +534,9 @@ func TestPluginBadPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error")
 	}
+	if err.Error() != "status update failed, server replied with HTTP 404 Not Found" {
+		t.Fatalf("Unexpected error contents: %v", err)
+	}
 }
 
 func TestPluginBadStatus(t *testing.T) {
@@ -497,6 +548,36 @@ func TestPluginBadStatus(t *testing.T) {
 	err := fixture.plugin.oneShot(ctx)
 	if err == nil {
 		t.Fatal("Expected error")
+	}
+	if err.Error() != "status update failed, server replied with HTTP 500 Internal Server Error" {
+		t.Fatalf("Unexpected error contents: %v", err)
+	}
+}
+
+func TestPluginNonstandardStatus(t *testing.T) {
+	fixture := newTestFixture(t, nil)
+	ctx := context.Background()
+	fixture.server.expCode = 599
+	defer fixture.server.stop()
+	fixture.plugin.lastBundleStatuses = map[string]*bundle.Status{}
+	err := fixture.plugin.oneShot(ctx)
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+	if err.Error() != "status update failed, server replied with HTTP 599 " {
+		t.Fatalf("Unexpected error contents: %v", err)
+	}
+}
+
+func TestPlugin2xxStatus(t *testing.T) {
+	fixture := newTestFixture(t, nil)
+	ctx := context.Background()
+	fixture.server.expCode = 204
+	defer fixture.server.stop()
+	fixture.plugin.lastBundleStatuses = map[string]*bundle.Status{}
+	err := fixture.plugin.oneShot(ctx)
+	if err != nil {
+		t.Fatal("Expected no error")
 	}
 }
 

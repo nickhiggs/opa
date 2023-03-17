@@ -8,26 +8,19 @@
 package download
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/open-policy-agent/opa/bundle"
-	"github.com/open-policy-agent/opa/keys"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
-	"github.com/open-policy-agent/opa/plugins/rest"
 )
 
 func TestStartStop(t *testing.T) {
@@ -58,6 +51,10 @@ func TestStartStop(t *testing.T) {
 
 	if !strings.HasSuffix(u1.Bundle.Modules[0].URL, u1.Bundle.Modules[0].Path) {
 		t.Fatalf("expected URL to have path as suffix but got %v and %v", u1.Bundle.Modules[0].URL, u1.Bundle.Modules[0].Path)
+	}
+
+	if u1.Size == 0 {
+		t.Fatal("expected non-0 size")
 	}
 
 	d.Stop(ctx)
@@ -95,6 +92,10 @@ func TestStartStopWithBundlePersistence(t *testing.T) {
 
 	if u1.Raw == nil {
 		t.Fatal("expected bundle reader to be non-nil")
+	}
+
+	if u1.Size == 0 {
+		t.Fatal("expected non-0 size")
 	}
 
 	r := bundle.NewReader(u1.Raw)
@@ -155,6 +156,47 @@ func TestStopWithMultipleCalls(t *testing.T) {
 	}
 }
 
+func TestStartStopWithLazyLoadingMode(t *testing.T) {
+	ctx := context.Background()
+	fixture := newTestFixture(t)
+
+	updates := make(chan *Update)
+
+	config := Config{}
+	if err := config.ValidateAndInjectDefaults(); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New(config, fixture.client, "/bundles/test/bundle1").WithCallback(func(_ context.Context, u Update) {
+		updates <- &u
+	}).WithLazyLoadingMode(true)
+
+	d.Start(ctx)
+
+	// Give time for some download events to occur
+	time.Sleep(1 * time.Second)
+
+	u1 := <-updates
+
+	if u1.Bundle == nil || len(u1.Bundle.Modules) == 0 {
+		t.Fatal("expected bundle with at least one module but got:", u1)
+	}
+
+	if !strings.HasSuffix(u1.Bundle.Modules[0].URL, u1.Bundle.Modules[0].Path) {
+		t.Fatalf("expected URL to have path as suffix but got %v and %v", u1.Bundle.Modules[0].URL, u1.Bundle.Modules[0].Path)
+	}
+
+	if len(u1.Bundle.Raw) == 0 {
+		t.Fatal("expected bundle to contain raw bytes")
+	}
+
+	if len(u1.Bundle.Data) != 0 {
+		t.Fatal("expected the bundle object to contain no data")
+	}
+
+	d.Stop(ctx)
+}
+
 func TestStartStopWithDeltaBundleMode(t *testing.T) {
 	ctx := context.Background()
 
@@ -181,6 +223,10 @@ func TestStartStopWithDeltaBundleMode(t *testing.T) {
 
 	if u1.Bundle == nil || u1.Bundle.Manifest.Revision != deltaBundleMode {
 		t.Fatal("expected delta bundle but got:", u1)
+	}
+
+	if u1.Size == 0 {
+		t.Fatal("expected non-0 size")
 	}
 
 	d.Stop(ctx)
@@ -405,6 +451,40 @@ func TestEtagCachingLifecycle(t *testing.T) {
 		t.Fatal("expected update")
 	} else if fixture.d.etag != fixture.server.expEtag {
 		t.Fatalf("Expected downloader ETag %v but got %v", fixture.server.expEtag, fixture.d.etag)
+	}
+}
+
+func TestOneShotWithBundleEtag(t *testing.T) {
+
+	ctx := context.Background()
+	fixture := newTestFixture(t)
+	fixture.d = New(Config{}, fixture.client, "/bundles/test/bundle1").WithCallback(fixture.oneShot)
+	fixture.server.expEtag = "some etag value"
+	defer fixture.server.stop()
+
+	// check etag on the downloader is empty
+	if fixture.d.etag != "" {
+		t.Fatalf("Expected empty downloader ETag but got %v", fixture.d.etag)
+	}
+
+	// simulate successful bundle activation and check updated etag on the downloader
+	fixture.server.expCode = 0
+	err := fixture.d.oneShot(ctx)
+	if err != nil {
+		t.Fatal("Unexpected:", err)
+	}
+
+	if fixture.d.etag != fixture.server.expEtag {
+		t.Fatalf("Expected downloader ETag %v but got %v", fixture.server.expEtag, fixture.d.etag)
+	}
+
+	if fixture.updates[0].Bundle == nil {
+		// 200 response on first request, bundle should be present
+		t.Errorf("Expected bundle in response")
+	}
+
+	if fixture.updates[0].Bundle.Etag != fixture.server.expEtag {
+		t.Fatalf("Expected bundle ETag %v but got %v", fixture.server.expEtag, fixture.updates[0].Bundle.Etag)
 	}
 }
 
@@ -724,227 +804,4 @@ func TestWarnOnNonBundleContentType(t *testing.T) {
 	if !found {
 		t.Errorf("Expected log entry: %s", expectLogged)
 	}
-}
-
-type testFixture struct {
-	d                         *Downloader
-	client                    rest.Client
-	server                    *testServer
-	updates                   []Update
-	mockBundleActivationError bool
-	etags                     map[string]string
-}
-
-func newTestFixture(t *testing.T) testFixture {
-
-	patch := bundle.PatchOperation{
-		Op:    "upsert",
-		Path:  "/a/c/d",
-		Value: []string{"foo", "bar"},
-	}
-
-	ts := testServer{
-		t:       t,
-		expAuth: "Bearer secret",
-		bundles: map[string]bundle.Bundle{
-			"test/bundle1": {
-				Manifest: bundle.Manifest{
-					Revision: "quickbrownfaux",
-				},
-				Data: map[string]interface{}{
-					"foo": map[string]interface{}{
-						"bar": json.Number("1"),
-						"baz": "qux",
-					},
-				},
-				Modules: []bundle.ModuleFile{
-					{
-						Path: `/example.rego`,
-						Raw:  []byte("package foo\n\ncorge=1"),
-					},
-				},
-			},
-			"test/bundle2": {
-				Manifest: bundle.Manifest{
-					Revision: deltaBundleMode,
-				},
-				Patch: bundle.Patch{Data: []bundle.PatchOperation{patch}},
-			},
-		},
-	}
-
-	ts.start()
-
-	restConfig := []byte(fmt.Sprintf(`{
-		"url": %q,
-		"credentials": {
-			"bearer": {
-				"scheme": "Bearer",
-				"token": "secret"
-			}
-		}
-	}`, ts.server.URL))
-
-	tc, err := rest.New(restConfig, map[string]*keys.Config{})
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return testFixture{
-		client:  tc,
-		server:  &ts,
-		updates: []Update{},
-		etags:   make(map[string]string),
-	}
-}
-
-func (t *testFixture) oneShot(ctx context.Context, u Update) {
-
-	t.updates = append(t.updates, u)
-
-	if u.Error != nil {
-		etag := t.etags["test/bundle1"]
-		t.d.SetCache(etag)
-		return
-	}
-
-	if u.Bundle != nil {
-		if t.mockBundleActivationError {
-			etag := t.etags["test/bundle1"]
-			t.d.SetCache(etag)
-			return
-		}
-	}
-
-	t.etags["test/bundle1"] = u.ETag
-}
-
-type testServer struct {
-	t              *testing.T
-	expCode        int
-	expEtag        string
-	expAuth        string
-	bundles        map[string]bundle.Bundle
-	server         *httptest.Server
-	etagInResponse bool
-	longPoll       bool
-}
-
-func (t *testServer) handle(w http.ResponseWriter, r *http.Request) {
-
-	if t.longPoll {
-
-		var timeout time.Duration
-
-		wait := getPreferHeaderField(r, "wait")
-		if wait != "" {
-			waitTime, err := strconv.Atoi(wait)
-			if err != nil {
-				panic(err)
-			}
-			timeout = time.Duration(waitTime) * time.Second
-		}
-
-		// simulate long operation
-		time.Sleep(timeout)
-	}
-
-	if t.expCode != 0 {
-		w.WriteHeader(t.expCode)
-		return
-	}
-
-	if t.expAuth != "" {
-		if r.Header.Get("Authorization") != t.expAuth {
-			w.WriteHeader(401)
-			return
-		}
-	}
-
-	name := strings.TrimPrefix(r.URL.Path, "/bundles/")
-	b, ok := t.bundles[name]
-	if !ok {
-		w.WriteHeader(404)
-		return
-	}
-
-	// check to verify if server can send a delta bundle to OPA
-	if b.Manifest.Revision == deltaBundleMode {
-		modes := strings.Split(getPreferHeaderField(r, "modes"), ",")
-
-		found := false
-		for _, m := range modes {
-			if m == deltaBundleMode {
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			panic("delta bundle requested but OPA does not support it")
-		}
-	}
-
-	contentTypeShouldBeSend := true
-	if t.expEtag != "" {
-		etag := r.Header.Get("If-None-Match")
-		if etag == t.expEtag {
-			contentTypeShouldBeSend = false
-			if t.etagInResponse {
-				w.Header().Add("Etag", t.expEtag)
-			}
-			w.WriteHeader(304)
-			return
-		}
-	}
-
-	if t.longPoll && contentTypeShouldBeSend {
-		// in 304 Content-Type is not send according https://datatracker.ietf.org/doc/html/rfc7232#section-4.1
-		w.Header().Add("Content-Type", "application/vnd.openpolicyagent.bundles")
-	} else {
-		if r.URL.Path == "/bundles/not-a-bundle" {
-			w.Header().Add("Content-Type", "text/html")
-		} else {
-			w.Header().Add("Content-Type", "application/gzip")
-		}
-	}
-
-	if t.expEtag != "" {
-		w.Header().Add("Etag", t.expEtag)
-	}
-
-	w.WriteHeader(200)
-
-	var buf bytes.Buffer
-
-	if err := bundle.Write(&buf, b); err != nil {
-		w.WriteHeader(500)
-	}
-
-	if _, err := w.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
-
-func (t *testServer) start() {
-	t.server = httptest.NewServer(http.HandlerFunc(t.handle))
-}
-
-func (t *testServer) stop() {
-	t.server.Close()
-}
-
-func getPreferHeaderField(r *http.Request, field string) string {
-	for _, line := range r.Header.Values("prefer") {
-		for _, part := range strings.Split(line, ";") {
-			preference := strings.Split(strings.TrimSpace(part), "=")
-			if len(preference) == 2 {
-				if strings.ToLower(preference[0]) == field {
-					return preference[1]
-				}
-			}
-		}
-	}
-	return ""
 }

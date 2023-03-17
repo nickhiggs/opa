@@ -33,7 +33,7 @@
 //
 // All keys written by the disk.Store implementation are prefixed as follows:
 //
-//   /<schema_version>/<partition_version>/<type>
+//	/<schema_version>/<partition_version>/<type>
 //
 // The <schema_version> value represents the version of the schema understood by
 // this version of OPA. Currently this is always set to 1. The
@@ -60,7 +60,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -100,6 +104,7 @@ type Store struct {
 	triggers   map[*handle]struct{} // registered triggers
 	gcTicker   *time.Ticker         // gc ticker
 	close      chan struct{}        // close-only channel for stopping the GC goroutine
+	backupDB   *badger.DB           // backup of the underlying key-value store
 }
 
 const (
@@ -113,6 +118,9 @@ const (
 	// basePartitionVersion represents the version of the caller-supplied data
 	// layout (aka partitioning).
 	basePartitionVersion int64 = 1
+
+	// symlink to directory path where badger write its files to
+	symlinkKey = "active"
 )
 
 type metadata struct {
@@ -147,7 +155,13 @@ func New(ctx context.Context, logger logging.Logger, prom prometheus.Registerer,
 		}
 	}
 
-	db, err := badger.Open(badgerConfigFromOptions(opts).WithLogger(&wrap{logger}))
+	options, err := badgerConfigFromOptions(opts)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	options = options.WithLogger(&wrap{logger})
+	db, err := badger.Open(options)
 	if err != nil {
 		return nil, wrapError(err)
 	}
@@ -235,6 +249,227 @@ func (db *Store) NewTransaction(ctx context.Context, params ...storage.Transacti
 	return newTransaction(xid, write, underlying, context, db.pm, db.partitions, db), nil
 }
 
+// Truncate implements the storage.Store interface. This method must be called within a transaction.
+func (db *Store) Truncate(ctx context.Context, txn storage.Transaction, params storage.TransactionParams, it storage.Iterator) error {
+
+	// backup the existing store
+	currentDB, err := db.backupAndLoadDB()
+	if err != nil {
+		return wrapError(err)
+	}
+
+	db.backupDB = currentDB
+
+	// commit in-flight txn on the existing store
+	uTxn, err := db.underlying(txn)
+	if err != nil {
+		return err
+	}
+
+	_, err = uTxn.Commit(ctx)
+	if err != nil {
+		return wrapError(err)
+	}
+
+	// write new bundle policy and data into the existing DB
+	underlying := db.db.NewTransaction(true)
+	xid := atomic.AddUint64(&db.xid, uint64(1))
+	underlyingTxn := newTransaction(xid, true, underlying, params.Context, db.pm, db.partitions, db)
+
+	// For backwards compatibility, check if `RootOverwrite` was configured.
+	if params.RootOverwrite || overwriteRoot(params.BasePaths) {
+		newPath, ok := storage.ParsePathEscaped("/")
+		if !ok {
+			return fmt.Errorf("storage path invalid: %v", newPath)
+		}
+
+		sTxn, err := db.doTruncateData(ctx, underlyingTxn, db.db, params, newPath, map[string]interface{}{})
+		if err != nil {
+			return wrapError(err)
+		}
+
+		if sTxn != nil {
+			underlyingTxn = sTxn
+		}
+	}
+
+	for {
+		var update *storage.Update
+
+		update, err = it.Next()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return wrapError(err)
+		}
+
+		if update.IsPolicy {
+			err = underlyingTxn.UpsertPolicy(ctx, strings.TrimLeft(update.Path.String(), "/"), update.Value)
+			if err != nil {
+				if err != badger.ErrTxnTooBig {
+					return wrapError(err)
+				}
+
+				_, err = underlyingTxn.Commit(ctx)
+				if err != nil {
+					return wrapError(err)
+				}
+
+				underlying = db.db.NewTransaction(true)
+				xid = atomic.AddUint64(&db.xid, uint64(1))
+				underlyingTxn = newTransaction(xid, true, underlying, params.Context, db.pm, db.partitions, db)
+
+				if err = underlyingTxn.UpsertPolicy(ctx, strings.TrimLeft(update.Path.String(), "/"), update.Value); err != nil {
+					return wrapError(err)
+				}
+			}
+		} else {
+			if len(update.Path) > 0 {
+				sTxn, err := db.doTruncateData(ctx, underlyingTxn, db.db, params, update.Path, update.Value)
+				if err != nil {
+					return wrapError(err)
+				}
+
+				if sTxn != nil {
+					underlyingTxn = sTxn
+				}
+			} else {
+				for _, root := range params.BasePaths {
+					newPath, ok := storage.ParsePathEscaped("/" + root)
+					if !ok {
+						return fmt.Errorf("storage path invalid: %v", newPath)
+					}
+
+					value, ok, err := lookup(newPath, update.Value)
+					if err != nil {
+						return err
+					}
+
+					if ok {
+						if len(newPath) > 0 {
+							if err := storage.MakeDir(ctx, db, underlyingTxn, newPath[:len(newPath)-1]); err != nil {
+								return err
+							}
+						}
+
+						sTxn, err := db.doTruncateData(ctx, underlyingTxn, db.db, params, newPath, value)
+						if err != nil {
+							return wrapError(err)
+						}
+
+						if sTxn != nil {
+							underlyingTxn = sTxn
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if err != nil && err != io.EOF {
+		return wrapError(err)
+	}
+
+	// commit active transaction on existing store
+	_, err = underlyingTxn.Commit(ctx)
+	if err != nil {
+		return wrapError(err)
+	}
+
+	// Open write txn on the existing store in-case there are more write operations.
+	// The caller will either commit or abort this transaction
+	uTxn.stale = false
+	uTxn.underlying = db.db.NewTransaction(true)
+
+	return nil
+}
+
+func (db *Store) doTruncateData(ctx context.Context, underlying *transaction, badgerdb *badger.DB,
+	params storage.TransactionParams, path storage.Path, value interface{}) (*transaction, error) {
+
+	err := underlying.Write(ctx, storage.AddOp, path, value)
+	if err != nil {
+		if err != badger.ErrTxnTooBig {
+			return nil, wrapError(err)
+		}
+
+		_, err = underlying.Commit(ctx)
+		if err != nil {
+			return nil, wrapError(err)
+		}
+
+		txn := badgerdb.NewTransaction(true)
+		xid := atomic.AddUint64(&db.xid, uint64(1))
+		sTxn := newTransaction(xid, true, txn, params.Context, db.pm, db.partitions, db)
+
+		if err = sTxn.Write(ctx, storage.AddOp, path, value); err != nil {
+			return nil, wrapError(err)
+		}
+
+		return sTxn, nil
+	}
+
+	return nil, nil
+}
+
+func (db *Store) backupAndLoadDB() (*badger.DB, error) {
+	currDir := db.db.Opts().Dir
+
+	// backup db
+	backupDir, err := os.MkdirTemp(path.Dir(currDir), "backup")
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	bak, err := os.CreateTemp(backupDir, "badgerbak")
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	_, err = db.db.Backup(bak, 0)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	// restore db
+	newDBDir, err := os.MkdirTemp(path.Dir(currDir), "backup")
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	opts := db.db.Opts().WithDir(newDBDir).WithValueDir(newDBDir)
+
+	// open new db
+	newDB, err := badger.Open(opts)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	bak, err = os.Open(bak.Name())
+	if err != nil {
+		return nil, err
+	}
+	defer bak.Close()
+
+	err = newDB.Load(bak, 16)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	return newDB, wrapError(os.RemoveAll(backupDir))
+}
+
+func (db *Store) cleanup(oldDB *badger.DB) error {
+	err := oldDB.Close()
+	if err != nil {
+		return wrapError(err)
+	}
+
+	return wrapError(os.RemoveAll(oldDB.Opts().Dir))
+}
+
 // Commit implements the storage.Store interface.
 func (db *Store) Commit(ctx context.Context, txn storage.Transaction) error {
 	underlying, err := db.underlying(txn)
@@ -254,6 +489,15 @@ func (db *Store) Commit(ctx context.Context, txn storage.Transaction) error {
 		for h := range db.triggers {
 			h.cb(ctx, readTxn, event)
 		}
+
+		// cleanup backup db
+		if db.backupDB != nil {
+			if err := db.cleanup(db.backupDB); err != nil {
+				panic(err)
+			}
+			db.backupDB = nil
+		}
+
 		db.rmu.Unlock()
 		db.wmu.Unlock()
 	} else { // committing read txn
@@ -270,7 +514,35 @@ func (db *Store) Abort(ctx context.Context, txn storage.Transaction) {
 		panic(err)
 	}
 	underlying.Abort(ctx)
+
 	if underlying.write {
+
+		if db.backupDB != nil {
+			db.rmu.Lock()
+
+			// update symlink to point to the backup db
+			symlink := filepath.Join(path.Dir(db.backupDB.Opts().Dir), symlinkKey)
+			// "active" -> "backupXXXX" is what we want, not
+			// "active" -> "DIR/backupXXX", since that won't work when using a relative directory
+			target := filepath.Base(db.backupDB.Opts().Dir)
+
+			err = createSymlink(target, symlink)
+			if err != nil {
+				panic(err)
+			}
+
+			// swap db
+			oldDb := db.db
+			db.db = db.backupDB
+
+			// cleanup existing db
+			if err := db.cleanup(oldDb); err != nil {
+				panic(err)
+			}
+
+			db.rmu.Unlock()
+		}
+
 		db.wmu.Unlock()
 	} else {
 		db.rmu.RUnlock()
@@ -533,7 +805,9 @@ func (db *Store) validatePartitions(ctx context.Context, txn *badger.Txn, existi
 
 // MakeDir makes Store a storage.MakeDirer, to avoid the superfluous MakeDir
 // steps -- MakeDir is implicit in the disk storage's data layout, since
-//     {"foo": {"bar": {"baz": 10}}}
+//
+//	{"foo": {"bar": {"baz": 10}}}
+//
 // writes value `10` to key `/foo/bar/baz`.
 //
 // Here, we only check if it's a write transaction, for consistency with
@@ -687,6 +961,73 @@ func toString(path storage.Path) string {
 // what we have badger write its files to. It is done to give us some
 // wiggle room in the future should we need to put further files on the
 // file system (like backups): we can then just use the opts.Dir.
-func dataDir(dir string) string {
-	return filepath.Join(dir, "data")
+func dataDir(dir string) (string, error) {
+
+	symlink := filepath.Join(dir, symlinkKey)
+	if _, err := os.Lstat(symlink); err == nil {
+		return filepath.EvalSymlinks(symlink)
+	}
+
+	return filepath.Join(dir, "data"), nil
+}
+
+func createSymlink(target, symlink string) error {
+	var lerr error
+
+	if _, lerr = os.Lstat(symlink); lerr == nil {
+		if err := os.Remove(symlink); err != nil {
+			return err
+		}
+
+		if err := os.Symlink(target, symlink); err != nil {
+			return err
+		}
+	} else if errors.Is(lerr, os.ErrNotExist) {
+		if err := os.Symlink(target, symlink); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	return lerr
+}
+
+func lookup(path storage.Path, data []byte) (interface{}, bool, error) {
+	var obj map[string]json.RawMessage
+	err := util.Unmarshal(data, &obj)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if len(path) == 0 {
+		return obj, true, nil
+	}
+
+	for i := 0; i < len(path)-1; i++ {
+		value, ok := obj[path[i]]
+		if !ok {
+			return nil, false, nil
+		}
+
+		var next map[string]json.RawMessage
+		err := util.Unmarshal(value, &next)
+		if err != nil {
+			return nil, false, err
+		}
+
+		obj = next
+	}
+
+	value, ok := obj[path[len(path)-1]]
+	return value, ok, nil
+}
+
+func overwriteRoot(roots []string) bool {
+	for _, root := range roots {
+		if root == "" {
+			return true
+		}
+	}
+	return false
 }

@@ -3,6 +3,7 @@ package compile
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/format"
 	"github.com/open-policy-agent/opa/internal/ref"
+	"github.com/open-policy-agent/opa/ir"
 	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/util/test"
@@ -52,6 +54,11 @@ func TestCompilerInitErrors(t *testing.T) {
 			note: "wasm compilation requires at least one entrypoint",
 			c:    New().WithTarget("wasm"),
 			want: errors.New("wasm compilation requires at least one entrypoint"),
+		},
+		{
+			note: "plan compilation requires at least one entrypoint",
+			c:    New().WithTarget("plan"),
+			want: errors.New("plan compilation requires at least one entrypoint"),
 		},
 	}
 
@@ -211,6 +218,64 @@ func TestCompilerLoadFilesystem(t *testing.T) {
 
 		if !compiler.bundle.Equal(*exp) {
 			t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", exp, compiler.bundle)
+		}
+	})
+}
+
+func TestCompilerLoadFilesystemWithEnablePrintStatementsFalse(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+
+                        allow { print(1) }
+		`,
+		"data.json": `
+			{"b1": {"k": "v"}}`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").WithEntrypoints("test/allow").
+			WithEnablePrintStatements(false)
+
+		if err := compiler.Build(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		bundle := compiler.Bundle()
+
+		if strings.Contains(string(bundle.PlanModules[0].Raw), "internal.print") {
+			t.Fatalf("output different than expected:\n\ngot: %v\n\nfound: internal.print", string(bundle.PlanModules[0].Raw))
+		}
+	})
+}
+
+func TestCompilerLoadFilesystemWithEnablePrintStatementsTrue(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+
+                        allow { print(1) }
+		`,
+		"data.json": `
+			{"b1": {"k": "v"}}`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").WithEntrypoints("test/allow").
+			WithEnablePrintStatements(true)
+
+		if err := compiler.Build(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		bundle := compiler.Bundle()
+
+		if !strings.Contains(string(bundle.PlanModules[0].Raw), "internal.print") {
+			t.Fatalf("output different than expected:\n\ngot: %v\n\nmissing: internal.print", string(bundle.PlanModules[0].Raw))
 		}
 	})
 }
@@ -562,6 +627,89 @@ func TestCompilerWasmTargetMultipleEntrypoints(t *testing.T) {
 	})
 }
 
+func TestCompilerWasmTargetAnnotations(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+# METADATA
+# title: My test package
+package test
+
+# METADATA
+# title: My P rule
+# entrypoint: true
+p = true`,
+		"policy.rego": `
+package policy
+
+# METADATA
+# title: All my Q rules
+# scope: document
+
+# METADATA
+# title: My Q rule
+q = true`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().WithPaths(root).WithTarget("wasm").
+			WithEntrypoints("test", "policy/q").
+			WithRegoAnnotationEntrypoints(true)
+
+		err := compiler.Build(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(compiler.bundle.WasmModules) != 1 {
+			t.Fatalf("expected 1 Wasm modules, got: %d", len(compiler.bundle.WasmModules))
+		}
+
+		expWasmResolvers := []bundle.WasmResolver{
+			{
+				Entrypoint: "test",
+				Module:     "/policy.wasm",
+			},
+			{
+				Entrypoint: "policy/q",
+				Module:     "/policy.wasm",
+				Annotations: []*ast.Annotations{
+					{
+						Title: "All my Q rules",
+						Scope: "document",
+					},
+					{
+						Title: "My Q rule",
+						Scope: "rule",
+					},
+				},
+			},
+			{
+				Entrypoint: "test/p",
+				Module:     "/policy.wasm",
+				Annotations: []*ast.Annotations{
+					{
+						Title:      "My P rule",
+						Scope:      "rule",
+						Entrypoint: true,
+					},
+				},
+			},
+		}
+
+		if len(expWasmResolvers) != len(compiler.bundle.Manifest.WasmResolvers) {
+			t.Fatalf("\nExpected WasmResolvers:\n  %+v\nGot:\n  %+v\n", expWasmResolvers, compiler.bundle.Manifest.WasmResolvers)
+		}
+
+		for i, expWasmResolver := range expWasmResolvers {
+			if !expWasmResolver.Equal(&compiler.bundle.Manifest.WasmResolvers[i]) {
+				t.Fatalf("WasmResolver at index %v mismatch\n\nExpected WasmResolvers:\n  %+v\nGot:\n  %+v\n",
+					i, expWasmResolvers, compiler.bundle.Manifest.WasmResolvers)
+			}
+		}
+	})
+}
+
 func TestCompilerWasmTargetEntrypointDependents(t *testing.T) {
 	files := map[string]string{
 		"test.rego": `package test
@@ -680,6 +828,366 @@ func TestCompilerPlanTarget(t *testing.T) {
 			t.Fatal("expected to find compiled plan module")
 		}
 	})
+}
+
+func TestCompilerPlanTargetPruneUnused(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `package test
+		p[1]
+		f(x) { p[x] }`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().
+			WithPaths(root).
+			WithTarget("plan").
+			WithEntrypoints("test").
+			WithPruneUnused(true)
+		err := compiler.Build(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(compiler.bundle.PlanModules) == 0 {
+			t.Fatal("expected to find compiled plan module")
+		}
+
+		plan := compiler.bundle.PlanModules[0].Raw
+		var policy ir.Policy
+
+		if err := json.Unmarshal(plan, &policy); err != nil {
+			t.Fatal(err)
+		}
+		if exp, act := 1, len(policy.Funcs.Funcs); act != exp {
+			t.Fatalf("expected %d funcs, got %d", exp, act)
+		}
+		f := policy.Funcs.Funcs[0]
+		if exp, act := "g0.data.test.p", f.Name; act != exp {
+			t.Fatalf("expected func named %v, got %v", exp, act)
+		}
+	})
+}
+
+func TestCompilerPlanTargetUnmatchedEntrypoints(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `package test
+
+		p := 7
+		q := p + 1`,
+	}
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().WithPaths(root).WithTarget("plan").WithEntrypoints("test/p", "test/q", "test/no")
+		err := compiler.Build(context.Background())
+		if err == nil {
+			t.Error("expected error from unmatched entrypoint")
+		}
+		expectError := "entrypoint \"test/no\" does not refer to a rule or policy decision"
+		if err.Error() != expectError {
+			t.Errorf("expected error %s, got: %s", expectError, err.Error())
+		}
+	})
+
+	test.WithTempFS(files, func(root string) {
+
+		compiler := New().WithPaths(root).WithTarget("plan").WithEntrypoints("foo", "foo.bar", "test/no")
+		err := compiler.Build(context.Background())
+		if err == nil {
+			t.Error("expected error from unmatched entrypoints")
+		}
+		expectError := "entrypoint \"foo\" does not refer to a rule or policy decision"
+		if err.Error() != expectError {
+			t.Errorf("expected error %s, got: %s", expectError, err.Error())
+		}
+	})
+}
+
+func TestCompilerRegoEntrypointAnnotations(t *testing.T) {
+	tests := []struct {
+		note            string
+		entrypoints     []string
+		modules         map[string]string
+		data            string
+		roots           []string
+		wantEntrypoints map[string]struct{}
+	}{
+		{
+			note:        "rule annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+# METADATA
+# entrypoint: true
+p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/p": {},
+			},
+		},
+		{
+			note:        "package annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+# METADATA
+# entrypoint: true
+package test
+
+p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test": {},
+			},
+		},
+		{
+			note:        "nested rule annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+import data.test.nested
+
+p {
+	q[input.x]
+	nested.p
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+				"test/nested.rego": `
+package test.nested
+
+# METADATA
+# entrypoint: true
+p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/nested/p": {},
+			},
+		},
+		{
+			note:        "nested package annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+import data.test.nested
+
+p {
+	q[input.x]
+	nested.p
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+				"test/nested.rego": `
+# METADATA
+# entrypoint: true
+package test.nested
+
+p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/nested": {},
+			},
+		},
+		{
+			note:        "mixed manual entrypoints + annotation entrypoints",
+			entrypoints: []string{"test/p"},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+import data.test.nested
+
+p {
+	q[input.x]
+	nested.p
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+				"test/nested.rego": `
+# METADATA
+# entrypoint: true
+package test.nested
+
+p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/nested": {},
+				"test/p":      {},
+			},
+		},
+		{
+			note:        "ref head rule annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+# METADATA
+# entrypoint: true
+a.b.c.p {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/a/b/c/p": {},
+			},
+		},
+		{
+			note:        "mixed ref head rule/package annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+# METADATA
+# entrypoint: true
+package test.a.b.c
+
+# METADATA
+# entrypoint: true
+d.e.f.g {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/a/b/c":         {},
+				"test/a/b/c/d/e/f/g": {},
+			},
+		},
+		{
+			note:        "numbers in refs annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+# METADATA
+# entrypoint: true
+a.b[1.0] {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/a/b/1.0": {},
+			},
+		},
+		{
+			note:        "string path with brackets annotation",
+			entrypoints: []string{},
+			modules: map[string]string{
+				"test.rego": `
+package test
+
+# METADATA
+# entrypoint: true
+a.b["1.0.0"].foo {
+	q[input.x]
+}
+
+q[1]
+q[2]
+q[3]
+				`,
+			},
+			wantEntrypoints: map[string]struct{}{
+				"test/a/b/1.0.0/foo": {},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(tc.modules, func(root string) {
+
+				compiler := New().
+					WithPaths(root).
+					WithTarget("plan").
+					WithEntrypoints(tc.entrypoints...).
+					WithRegoAnnotationEntrypoints(true).
+					WithPruneUnused(true)
+				err := compiler.Build(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// Ensure we have the right number of entrypoints.
+				if len(compiler.entrypoints) != len(tc.wantEntrypoints) {
+					t.Fatalf("Wrong number of entrypoints. Expected %v, got %v.", tc.wantEntrypoints, compiler.entrypoints)
+				}
+
+				// Ensure those entrypoints match the ones we expect.
+				for _, entrypoint := range compiler.entrypoints {
+					if _, found := tc.wantEntrypoints[entrypoint]; !found {
+						t.Fatalf("Unexpected entrypoint '%s'", entrypoint)
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestCompilerSetRevision(t *testing.T) {
@@ -829,7 +1337,7 @@ func TestOptimizerErrors(t *testing.T) {
 					p { data.test.p }
 				`,
 			},
-			wantErr: fmt.Errorf("1 error occurred: test.rego:3: rego_recursion_error: rule p is recursive: p -> p"),
+			wantErr: fmt.Errorf("1 error occurred: test.rego:3: rego_recursion_error: rule data.test.p is recursive: data.test.p -> data.test.p"),
 		},
 		{
 			note:        "partial eval error",
@@ -923,6 +1431,36 @@ func TestOptimizerOutput(t *testing.T) {
 
 					p = true { 1 = input.x }
 					p = true { 2 = input.x }
+
+				`,
+				"test.rego": `
+					package test
+
+					q[1]
+					q[2]
+				`,
+			},
+		},
+		{
+			note:        "support rules, ref heads",
+			entrypoints: []string{"data.test.p.q.r"},
+			modules: map[string]string{
+				"test.rego": `
+					package test
+
+					default p.q.r = false
+					p.q.r { q[input.x] }
+
+					q[1]
+					q[2]`,
+			},
+			wantModules: map[string]string{
+				"optimized/test/p/q.rego": `
+					package test.p.q
+
+					default r = false
+					r = true { 1 = input.x }
+					r = true { 2 = input.x }
 
 				`,
 				"test.rego": `
@@ -1386,14 +1924,13 @@ func getOptimizer(modules map[string]string, data string, entries []string, root
 
 func getModuleFiles(src map[string]string, includeRaw bool) []bundle.ModuleFile {
 
-	var keys []string
-
+	keys := make([]string, 0, len(src))
 	for k := range src {
 		keys = append(keys, k)
 	}
 
 	sort.Strings(keys)
-	var modules []bundle.ModuleFile
+	modules := make([]bundle.ModuleFile, 0, len(keys))
 
 	for _, k := range keys {
 		module, err := ast.ParseModule(k, src[k])

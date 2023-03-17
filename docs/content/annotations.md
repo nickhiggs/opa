@@ -6,12 +6,13 @@ weight: 18
 
 The package and individual rules in a module can be annotated with a rich set of metadata.
 
-```rego
+```live:rego/metadata:module:read_only
 # METADATA
 # title: My rule
 # description: A rule that determines if x is allowed.
 # authors:
 # - John Doe <john@example.com>
+# entrypoint: true
 allow {
   ...
 }
@@ -34,13 +35,14 @@ comment block containing the YAML document is finished
 Name | Type | Description
 --- | --- | ---
 scope | string; one of `package`, `rule`, `document`, `subpackages` | The scope on which the `schemas` annotation is applied. Read more [here](./#scope).
-title | string | A human-redable name for the annotation target. Read more [here](#title).
+title | string | A human-readable name for the annotation target. Read more [here](#title).
 description | string | A description of the annotation target. Read more [here](#description).
 related_resources | list of URLs | A list of URLs pointing to related resources/documentation. Read more [here](#related-resources).
 authors | list of strings | A list of authors for the annotation target. Read more [here](#authors).
 organizations | list of strings | A list of organizations related to the annotation target. Read more [here](#organizations).
 schemas | list of object | A list of associations between value paths and schema definitions. Read more [here](#schemas).
-custom | list of arbitrary data | A custom list of named parameters holding arbitrary data. Read more [here](#custom).
+entrypoint | boolean | Whether or not the annotation target is to be used as a policy entrypoint. Read more [here](#entrypoint).
+custom | mapping of arbitrary data | A custom mapping of named parameters holding arbitrary data. Read more [here](#custom).
 
 ### Scope
 
@@ -50,149 +52,35 @@ a metadata block determines how that metadata block will be applied. If the
 immediately follows the annotation. The `scope` values that are currently
 supported are:
 
-* `rule` - applies to the individual rule statement. Default, when metadata block precedes rule.
-* `document` - applies to all of the rules with the same name in the same package
-* `package` - applies to all of the rules in the package, Default, when metadata block precedes package.
-* `subpackages` - applies to all of the rules in the package and all subpackages (recursively)
+* `rule` - applies to the individual rule statement (within the same file). Default, when metadata block precedes rule.
+* `document` - applies to all of the rules with the same name in the same package (across multiple files)
+* `package` - applies to all of the rules in the package (across multiple files). Default, when metadata block precedes package.
+* `subpackages` - applies to all of the rules in the package and all subpackages (recursively, across multiple files)
 
-In case of overlap, schema annotations override each other as follows:
-
-```
-rule overrides document
-document overrides package
-package overrides subpackages
-```
-
-The following sections explain how the different scopes work.
-
-#### Rule and Document Scopes
-
-```
-# METADATA
-# scope: rule
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
-}
-
-allow {
-    access := data.acl["bob"]
-    access[_] == input.operation
-}
-```
-
-In the example above, the second rule does not include an annotation, so type
-checking of the second rule would not take schemas into account. To enable type
-checking on the second (or other rules in the same file) we could specify the
-annotation multiple times:
-
-```
-# METADATA
-# scope: rule
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
-}
-
-# METADATA
-# scope: rule
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl["bob"]
-    access[_] == input.operation
-}
-```
-
-This is obviously redundant and error-prone. To avoid this problem, we can
-define the metadata block once on a rule with scope `document`:
-
-```
-# METADATA
-# scope: document
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
-}
-
-allow {
-    access := data.acl["bob"]
-    access[_] == input.operation
-}
-```
-
-In this example, the metadata with `document` scope has the same affect as the
-two `rule` scoped metadata blocks in the previous example.
-
-Since the `document` scope annotation applies to all rules with the same name in
-the same package (which can span multiple files) and there is no ordering across
-files in the same package, `document` scope annotations can only be specified
-**once** per rule set. The `document` scope annotation can be applied to any
-rule in the set (i.e., ordering does not matter.)
-
-#### Package and Subpackage Scopes
-
-Annotations can be defined at the `package` level and are then applied to all rules
-within the package:
-
-```
-# METADATA
-# scope: package
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
-package example
-
-allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
-}
-
-allow {
-    access := data.acl["bob"]
-    access[_] == input.operation
-}
-```
-
-`package` scoped schema annotations are useful when all rules in the same
-package operate on the same input structure. In some cases, when policies are
-organized into many sub-packages, it is useful to declare schemas recursively
-for them using the `subpackages` scope. For example:
-
-```
-# METADTA
-# scope: subpackages
-# schemas:
-# - input: schema.input
-package kubernetes.admission
-```
-
-This snippet would declare the top-level schema for `input` for the
-`kubernetes.admission` package as well as all subpackages. If admission control
-rules were defined inside packages like `kubernetes.admission.workloads.pods`,
-they would be able to pick up that one schema declaration.
+Since the `document` scope annotation applies to all rules with the same name in the same package 
+and the `package` and `subpackages` scope annotations apply to all packages with a matching path, metadata blocks with 
+these scopes are applied over all files with applicable package- and rule paths. 
+As there is no ordering across files in the same package, the `document`, `package`, and `subpackages` scope annotations 
+can only be specified **once** per path. 
+The `document` scope annotation can be applied to any rule in the set (i.e., ordering does not matter.)
 
 #### Example
 
-```rego
+```live:rego/metadata/scope:module:read_only
 # METADATA
 # scope: document
-# schemas:
-#   - input: schema.input
-#   - data.acl: schema["acl-schema"]
+# description: A set of rules that determines if x is allowed.
+
+# METADATA
+# title: Allow Ones
 allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
+    x == 1
+}
+
+# METADATA
+# title: Allow Twos
+allow {
+    x == 2
 }
 ```
 
@@ -202,7 +90,7 @@ The `title` annotation is a string value giving a human-readable name to the ann
 
 #### Example
 
-```rego
+```live:rego/metadata/title:module:read_only
 # METADATA
 # title: Allow Ones
 allow {
@@ -222,7 +110,7 @@ The `description` annotation is a string value describing the annotation target,
 
 #### Example
 
-```rego
+```live:rego/metadata/description:module:read_only
 # METADATA
 # description: |
 #  The 'allow' rule...
@@ -249,7 +137,7 @@ When a *related-resource* entry is presented as a string, it needs to be a valid
 
 #### Examples
 
-```rego
+```live:rego/metadata/related_resources1:module:read_only
 # METADATA
 # related_resources:
 # - ref: https://example.com
@@ -261,9 +149,9 @@ allow {
 }
 ```
 
-```rego
+```live:rego/metadata/related_resources2:module:read_only
 # METADATA
-# organizations:
+# related_resources:
 # - https://example.com/foo
 # ...
 # - https://example.com/bar
@@ -292,7 +180,7 @@ Optionally, the last word may represent an email, if enclosed with `<>`.
 
 #### Examples
 
-```rego
+```live:rego/metadata/authors1:module:read_only
 # METADATA
 # authors:
 # - name: John Doe
@@ -304,7 +192,7 @@ allow {
 }
 ```
 
-```rego
+```live:rego/metadata/authors2:module:read_only
 # METADATA
 # authors:
 # - John Doe
@@ -321,7 +209,7 @@ The `organizations` annotation is a list of string values representing the organ
 
 #### Example
 
-```rego
+```live:rego/metadata/organizations:module:read_only
 # METADATA
 # organizations:
 # - Acme Corp.
@@ -337,9 +225,13 @@ allow {
 The `schemas` annotation is a list of key value pairs, associating schemas to data values.
 In-depth information on this topic can be found [here](../schemas#schema-annotations).
 
-#### Example
+#### Schema Reference Format
 
-```rego
+Schema files can be referenced by path, where each path starts with the `schema` namespace, and trailing components specify 
+the path of the schema file (sans file-ending) relative to the root directory specified by the `--schema` flag on applicable commands.
+If the `--schema` flag is not present, referenced schemas are ignored during type checking.
+
+```live:rego/metadata/schemas_ref:module:read_only
 # METADATA
 # schemas:
 #   - input: schema.input
@@ -350,13 +242,42 @@ allow {
 }
 ```
 
+#### Inlined Schema Format
+
+Schema definitions can be inlined by specifying the schema structure as a YAML or JSON map.
+Inlined schemas are always used to inform type checking for the `eval`, `check`, and `test` commands; 
+in contrast to [by-reference schema annotations](#schema-reference-format), which require the `--schema` flag to be present in order to be evaluated.
+
+```live:rego/metadata/schemas_inline:module:read_only
+# METADATA
+# schemas:
+#   - input.x: {type: number}
+allow {
+    input.x == 42
+}
+```
+
+### Entrypoint
+
+The `entrypoint` annotation is a boolean used to mark rules and packages that should be used as entrypoints for a policy.
+This value is false by default, and can only be used at `rule` or `package` scope.
+
+The `build` and `eval` CLI commands will automatically pick up annotated entrypoints; you do not have to specify them with
+[`--entrypoint`](../cli/#options-1).
+
+{{< info >}}
+Unless the `--prune-unused` flag is used, any rule transitively referring to a
+package or rule declared as an entrypoint will also be enumerated as an entrypoint.
+{{< /info >}}
+
+
 ### Custom
 
-The `custom` annotation is an associative array of user-defined data, mapping string keys to arbitrarily typed values.
+The `custom` annotation is a mapping of user-defined data, mapping string keys to arbitrarily typed values.
 
 #### Example
 
-```rego
+```live:rego/metadata/custom:module:read_only
 # METADATA
 # custom:
 #  my_int: 42
@@ -375,6 +296,49 @@ allow {
 
 ## Accessing annotations
 
+### Rego
+
+In the example below, you can see how to access an annotation from within a policy.
+
+Given the input:
+
+```live:example/metadata/1:input
+{
+    "number": 11,
+    "subject": {
+        "name": "John doe",
+        "role": "customer"
+    }
+}
+```
+
+The following policy
+
+```live:example/metadata/1:module
+package example
+
+# METADATA
+# title: Deny invalid numbers
+# description: Numbers may not be higher than 5
+# custom:
+#  severity: MEDIUM
+output := decision {
+	input.number > 5
+
+	annotation := rego.metadata.rule()
+	decision := {
+		"severity": annotation.custom.severity,
+		"message": annotation.description,
+	}
+}
+```
+
+will output
+
+```live:example/metadata/1:output
+```
+
+If you'd like more examples and information on this, you can see more here under the [Rego](../policy-reference/#rego) policy reference.
 ### Inspect command
 
 Annotations can be listed through the `inspect` command by using the `-a` flag:
@@ -385,8 +349,8 @@ opa inspect -a
 
 ### Go API
 
-The `ast.AnnotationSet` is a collection of all `ast.Annotations` declared in a set of modules. 
-An `ast.AnnotationSet` can be created from a slice of compiled modules:
+The ``ast.AnnotationSet`` is a collection of all ``ast.Annotations`` declared in a set of modules. 
+An ``ast.AnnotationSet`` can be created from a slice of compiled modules:
 
 ```go
 var modules []*ast.Module
@@ -397,7 +361,7 @@ if err != nil {
 }
 ```
 
-or can be retrieved from an `ast.Compiler` instance:
+or can be retrieved from an ``ast.Compiler`` instance:
 
 ```go
 var modules []*ast.Module
@@ -407,7 +371,7 @@ compiler.Compile(modules)
 as := compiler.GetAnnotationSet()
 ```
 
-The `ast.AnnotationSet` can be flattened into a slice of `ast.AnnotationsRef`, which is a complete, sorted list of all 
+The ``ast.AnnotationSet`` can be flattened into a slice of ``ast.AnnotationsRef``, which is a complete, sorted list of all 
 annotations, grouped by the path and location of their targeted package or -rule.
 
 ```go
@@ -418,4 +382,59 @@ for _, entry := range flattened {
         entry.Location,
         entry.Annotations)
 }
+
+// Output:
+// data.foo at foo.rego:5 has annotations {"scope":"subpackages","organizations":["Acme Corp."]}
+// data.foo.bar at mod:3 has annotations {"scope":"package","description":"A couple of useful rules"}
+// data.foo.bar.p at mod:7 has annotations {"scope":"rule","title":"My Rule P"}
+//
+// For modules:
+// # METADATA
+// # scope: subpackages
+// # organizations:
+// # - Acme Corp.
+// package foo
+// ---
+// # METADATA
+// # description: A couple of useful rules
+// package foo.bar
+// 
+// # METADATA
+// # title: My Rule P
+// p := 7
+```
+
+Given an ``ast.Rule``, the ``ast.AnnotationSet`` can return the chain of annotations declared for that rule, and its path ancestry.
+The returned slice is ordered starting with the annotations for the rule, going outward to the farthest node with declared annotations 
+in the rule's path ancestry.
+
+```go
+var rule *ast.Rule
+...
+chain := ast.Chain(rule)
+for _, link := range chain {
+    fmt.Printf("link at %v has annotations %v\n",
+        link.Path,
+        link.Annotations)
+}
+
+// Output:
+// data.foo.bar.p at mod:7 has annotations {"scope":"rule","title":"My Rule P"}
+// data.foo.bar at mod:3 has annotations {"scope":"package","description":"A couple of useful rules"}
+// data.foo at foo.rego:5 has annotations {"scope":"subpackages","organizations":["Acme Corp."]}
+//
+// For modules:
+// # METADATA
+// # scope: subpackages
+// # organizations:
+// # - Acme Corp.
+// package foo
+// ---
+// # METADATA
+// # description: A couple of useful rules
+// package foo.bar
+// 
+// # METADATA
+// # title: My Rule P
+// p := 7
 ```

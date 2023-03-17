@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"time"
@@ -34,12 +33,14 @@ type runCmdParams struct {
 	tlsCertRefresh     time.Duration
 	ignore             []string
 	serverMode         bool
-	skipVersionCheck   bool
+	skipVersionCheck   bool // skipVersionCheck is deprecated. Use disableTelemetry instead
+	disableTelemetry   bool
 	authentication     *util.EnumFlag
 	authorization      *util.EnumFlag
 	minTLSVersion      *util.EnumFlag
 	logLevel           *util.EnumFlag
 	logFormat          *util.EnumFlag
+	logTimestampFormat string
 	algorithm          string
 	scope              string
 	pubKey             string
@@ -120,6 +121,18 @@ File paths can be specified as URLs to resolve ambiguity in paths containing col
 
     $ opa run file:///c:/path/to/data.json
 
+URL paths to remote public bundles (http or https) will be parsed as shorthand
+configuration equivalent of using repeated --set flags to accomplish the same:
+
+	$ opa run -s https://example.com/bundles/bundle.tar.gz
+
+The above shorthand command is identical to:
+
+    $ opa run -s --set "services.cli1.url=https://example.com" \
+                 --set "bundles.cli1.service=cli1" \
+                 --set "bundles.cli1.resource=/bundles/bundle.tar.gz" \
+                 --set "bundles.cli1.persist=true"
+
 The 'run' command can also verify the signature of a signed bundle.
 A signed bundle is a normal OPA bundle that includes a file
 named ".signatures.json". For more information on signed bundles
@@ -186,12 +199,21 @@ To skip bundle verification, use the --skip-verify flag.
 	runCommand.Flags().Var(cmdParams.minTLSVersion, "min-tls-version", "set minimum TLS version to be used by OPA's server")
 	runCommand.Flags().VarP(cmdParams.logLevel, "log-level", "l", "set log level")
 	runCommand.Flags().Var(cmdParams.logFormat, "log-format", "set log format")
+	runCommand.Flags().StringVar(&cmdParams.logTimestampFormat, "log-timestamp-format", "", "set log timestamp format (OPA_LOG_TIMESTAMP_FORMAT environment variable)")
 	runCommand.Flags().IntVar(&cmdParams.rt.GracefulShutdownPeriod, "shutdown-grace-period", 10, "set the time (in seconds) that the server will wait to gracefully shut down")
 	runCommand.Flags().IntVar(&cmdParams.rt.ShutdownWaitPeriod, "shutdown-wait-period", 0, "set the time (in seconds) that the server will wait before initiating shutdown")
 	addConfigOverrides(runCommand.Flags(), &cmdParams.rt.ConfigOverrides)
 	addConfigOverrideFiles(runCommand.Flags(), &cmdParams.rt.ConfigOverrideFiles)
 	addBundleModeFlag(runCommand.Flags(), &cmdParams.rt.BundleMode, false)
+
 	runCommand.Flags().BoolVar(&cmdParams.skipVersionCheck, "skip-version-check", false, "disables anonymous version reporting (see: https://www.openpolicyagent.org/docs/latest/privacy)")
+	err := runCommand.Flags().MarkDeprecated("skip-version-check", "\"skip-version-check\" is deprecated. Use \"disable-telemetry\" instead")
+	if err != nil {
+		fmt.Println("error:", err)
+		os.Exit(1)
+	}
+
+	runCommand.Flags().BoolVar(&cmdParams.disableTelemetry, "disable-telemetry", false, "disables anonymous information reporting (see: https://www.openpolicyagent.org/docs/latest/privacy)")
 	addIgnoreFlag(runCommand.Flags(), &cmdParams.ignore)
 
 	// bundle verification config
@@ -254,16 +276,27 @@ func initRuntime(ctx context.Context, params runCmdParams, args []string) (*runt
 	params.rt.Authorization = authorizationScheme[params.authorization.String()]
 	params.rt.MinTLSVersion = minTLSVersions[params.minTLSVersion.String()]
 	params.rt.Certificate = cert
+
+	timestampFormat := params.logTimestampFormat
+	if timestampFormat == "" {
+		timestampFormat = os.Getenv("OPA_LOG_TIMESTAMP_FORMAT")
+	}
 	params.rt.Logging = runtime.LoggingConfig{
-		Level:  params.logLevel.String(),
-		Format: params.logFormat.String(),
+		Level:           params.logLevel.String(),
+		Format:          params.logFormat.String(),
+		TimestampFormat: timestampFormat,
 	}
 	params.rt.Paths = args
 	params.rt.Filter = loaderFilter{
 		Ignore: params.ignore,
 	}.Apply
 
-	params.rt.EnableVersionCheck = !params.skipVersionCheck
+	params.rt.EnableVersionCheck = !params.disableTelemetry
+
+	// For backwards compatibility, check if `--skip-version-check` flag set.
+	if params.skipVersionCheck {
+		params.rt.EnableVersionCheck = false
+	}
 
 	params.rt.SkipBundleVerification = params.skipBundleVerify
 
@@ -319,7 +352,7 @@ func loadCertificate(tlsCertFile, tlsPrivateKeyFile string) (*tls.Certificate, e
 }
 
 func loadCertPool(tlsCACertFile string) (*x509.CertPool, error) {
-	caCertPEM, err := ioutil.ReadFile(tlsCACertFile)
+	caCertPEM, err := os.ReadFile(tlsCACertFile)
 	if err != nil {
 		return nil, fmt.Errorf("read CA cert file: %v", err)
 	}

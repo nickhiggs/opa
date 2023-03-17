@@ -6,7 +6,6 @@ package sdk
 
 import (
 	"io"
-	"io/ioutil"
 
 	"github.com/sirupsen/logrus"
 
@@ -40,6 +39,9 @@ type Options struct {
 	// registered with the OPA SDK instance.
 	Plugins map[string]plugins.Factory
 
+	// When calling the sdk the user can specify an opa id so that repeat calls to the sdk don't have a unique opa id
+	ID string
+
 	config []byte
 	block  bool
 }
@@ -64,7 +66,7 @@ func (o *Options) init() error {
 	if o.Config == nil {
 		o.config = []byte("{}")
 	} else {
-		bs, err := ioutil.ReadAll(o.Config)
+		bs, err := io.ReadAll(o.Config)
 		if err != nil {
 			return err
 		}
@@ -99,7 +101,7 @@ func (o *ConfigOptions) init() error {
 		o.block = true
 	}
 
-	bs, err := ioutil.ReadAll(o.Config)
+	bs, err := io.ReadAll(o.Config)
 	if err != nil {
 		return err
 	}

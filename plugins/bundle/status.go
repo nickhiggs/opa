@@ -6,10 +6,9 @@ package bundle
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"time"
-
-	"github.com/pkg/errors"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/download"
@@ -26,6 +25,8 @@ type Status struct {
 	Name                     string          `json:"name"`
 	ActiveRevision           string          `json:"active_revision,omitempty"`
 	LastSuccessfulActivation time.Time       `json:"last_successful_activation,omitempty"`
+	Type                     string          `json:"type,omitempty"`
+	Size                     int             `json:"size,omitempty"`
 	LastSuccessfulDownload   time.Time       `json:"last_successful_download,omitempty"`
 	LastSuccessfulRequest    time.Time       `json:"last_successful_request,omitempty"`
 	LastRequest              time.Time       `json:"last_request,omitempty"`
@@ -54,32 +55,39 @@ func (s *Status) SetRequest() {
 	s.LastRequest = time.Now().UTC()
 }
 
+func (s *Status) SetBundleSize(size int) {
+	s.Size = size
+}
+
 // SetError updates the status object to reflect a failure to download or
 // activate. If err is nil, the error status is cleared.
 func (s *Status) SetError(err error) {
-
-	if err == nil {
+	var (
+		astErrors ast.Errors
+		httpError download.HTTPError
+	)
+	switch {
+	case err == nil:
 		s.Code = ""
 		s.HTTPCode = ""
 		s.Message = ""
 		s.Errors = nil
-		return
-	}
 
-	switch cause := errors.Cause(err).(type) {
-	case ast.Errors:
+	case errors.As(err, &astErrors):
 		s.Code = errCode
 		s.HTTPCode = ""
 		s.Message = types.MsgCompileModuleError
-		s.Errors = make([]error, len(cause))
-		for i := range cause {
-			s.Errors[i] = cause[i]
+		s.Errors = make([]error, len(astErrors))
+		for i := range astErrors {
+			s.Errors[i] = astErrors[i]
 		}
-	case download.HTTPError:
+
+	case errors.As(err, &httpError):
 		s.Code = errCode
-		s.HTTPCode = json.Number(strconv.Itoa(cause.StatusCode))
+		s.HTTPCode = json.Number(strconv.Itoa(httpError.StatusCode))
 		s.Message = err.Error()
 		s.Errors = nil
+
 	default:
 		s.Code = errCode
 		s.HTTPCode = ""
