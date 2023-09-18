@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -66,6 +67,7 @@ type Compiler struct {
 	filter                       loader.Filter              // filter to apply to file loader
 	paths                        []string                   // file paths to load. TODO(tsandall): add support for supplying readers for embedded users.
 	entrypoints                  orderedStringSet           // policy entrypoints required for optimization and certain targets
+	roots                        []string                   // optionally, bundle roots can be provided
 	useRegoAnnotationEntrypoints bool                       // allow compiler to late-bind entrypoints from annotated rules in policies.
 	optimizationLevel            int                        // how aggressive should optimization be
 	target                       string                     // target type (wasm, rego, etc.)
@@ -79,6 +81,8 @@ type Compiler struct {
 	bsc                          *bundle.SigningConfig      // represents the key configuration used to generate a signed bundle
 	keyID                        string                     // represents the name of the default key used to verify a signed bundle
 	metadata                     *map[string]interface{}    // represents additional data included in .manifest file
+	fsys                         fs.FS                      // file system to use when loading paths
+	ns                           string
 }
 
 // New returns a new compiler instance that can be invoked.
@@ -217,6 +221,24 @@ func (c *Compiler) WithCapabilities(capabilities *ast.Capabilities) *Compiler {
 // WithMetadata sets the additional data to be included in .manifest
 func (c *Compiler) WithMetadata(metadata *map[string]interface{}) *Compiler {
 	c.metadata = metadata
+	return c
+}
+
+// WithRoots sets the roots to include in the output bundle manifest.
+func (c *Compiler) WithRoots(r ...string) *Compiler {
+	c.roots = append(c.roots, r...)
+	return c
+}
+
+// WithFS sets the file system to use when loading paths
+func (c *Compiler) WithFS(fsys fs.FS) *Compiler {
+	c.fsys = fsys
+	return c
+}
+
+// WithPartialNamespace sets the namespace to use for partial evaluation results
+func (c *Compiler) WithPartialNamespace(ns string) *Compiler {
+	c.ns = ns
 	return c
 }
 
@@ -410,7 +432,7 @@ func (c *Compiler) initBundle() error {
 	// TODO(tsandall): the metrics object should passed through here so we that
 	// we can track read and parse times.
 
-	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false, c.useRegoAnnotationEntrypoints, c.capabilities)
+	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false, c.useRegoAnnotationEntrypoints, c.capabilities, c.fsys)
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
@@ -438,11 +460,14 @@ func (c *Compiler) initBundle() error {
 		return nil
 	}
 
-	// TODO(tsandall): add support for controlling roots. Either the caller could
-	// supply them or the compiler could infer them based on the packages and data
-	// contents. The latter would require changes to the loader to preserve the
+	// TODO(tsandall): roots could be automatically inferred based on the packages and data
+	// contents. That would require changes to the loader to preserve the
 	// locations where base documents were mounted under data.
 	result := &bundle.Bundle{}
+	if len(c.roots) > 0 {
+		result.Manifest.Roots = &c.roots
+	}
+
 	result.Manifest.Init()
 	result.Data = load.Files.Documents
 
@@ -481,6 +506,10 @@ func (c *Compiler) optimize(ctx context.Context) error {
 		WithDebug(c.debug.Writer()).
 		WithShallowInlining(c.optimizationLevel <= 1).
 		WithEnablePrintStatements(c.enablePrintStatements)
+
+	if c.ns != "" {
+		o = o.WithPartialNamespace(c.ns)
+	}
 
 	err := o.Do(ctx)
 	if err != nil {
@@ -833,6 +862,11 @@ func (o *optimizer) WithEntrypoints(es []*ast.Term) *optimizer {
 
 func (o *optimizer) WithShallowInlining(yes bool) *optimizer {
 	o.shallow = yes
+	return o
+}
+
+func (o *optimizer) WithPartialNamespace(ns string) *optimizer {
+	o.nsprefix = ns
 	return o
 }
 

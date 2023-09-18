@@ -131,13 +131,19 @@ func TestEvalWithProfiler(t *testing.T) {
 	files := map[string]string{
 		"x.rego": `package x
 
-p = 1`,
+p {
+	a := 1
+	b := 2
+	c := 3
+	x = a + b * c
+}`,
 	}
 
 	test.WithTempFS(files, func(path string) {
 
 		params := newEvalCommandParams()
 		params.profile = true
+		params.profileCriteria = newrepeatedStringFlag([]string{"line"})
 		params.dataPaths = newrepeatedStringFlag([]string{path})
 
 		var buf bytes.Buffer
@@ -155,6 +161,29 @@ p = 1`,
 
 		if len(output.Profile) == 0 {
 			t.Fatal("Expected profile output to be non-empty")
+		}
+
+		expectedNumEval := []int{3, 1, 1, 1, 1}
+		expectedNumRedo := []int{3, 1, 1, 1, 1}
+		expectedRow := []int{7, 6, 5, 4, 1}
+		expectedNumGenExpr := []int{3, 1, 1, 1, 1}
+
+		for idx, actualExprStat := range output.Profile {
+			if actualExprStat.NumEval != expectedNumEval[idx] {
+				t.Fatalf("Index %v: Expected number of evals %v but got %v", idx, expectedNumEval[idx], actualExprStat.NumEval)
+			}
+
+			if actualExprStat.NumRedo != expectedNumRedo[idx] {
+				t.Fatalf("Index %v: Expected number of redos %v but got %v", idx, expectedNumRedo[idx], actualExprStat.NumRedo)
+			}
+
+			if actualExprStat.Location.Row != expectedRow[idx] {
+				t.Fatalf("Index %v: Expected row %v but got %v", idx, expectedRow[idx], actualExprStat.Location.Row)
+			}
+
+			if actualExprStat.NumGenExpr != expectedNumGenExpr[idx] {
+				t.Fatalf("Index %v: Expected number of generated expressions %v but got %v", idx, expectedNumGenExpr[idx], actualExprStat.NumGenExpr)
+			}
 		}
 	})
 }
@@ -485,8 +514,8 @@ package test
 # METADATA
 # schemas:
 #   - input: schema["input"]
-p { 
-	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation 
+p { 	
+	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation
 	input.foo == 42 # type mismatch with schema that should be ignored
 }`
 
@@ -500,9 +529,9 @@ package test
 # METADATA
 # schemas:
 #   - input.foo: {"type": "boolean"}
-p { 
-	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation 
-	input.foo == 42 # type mismatch with schema that should be ignored
+p {
+	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation	 
+	input.foo == 42 # type mismatch with schema that should NOT be ignored since it is an inlined schema format
 }`
 
 	err = testEvalWithSchemasAnnotationButNoSchemaFlag(policyWithInlinedSchema)
@@ -1280,6 +1309,116 @@ time.clock(input.y, time.clock(input.x))
 				t.Errorf("expected output %q\ngot %q", tc.expected, actual)
 			}
 		})
+	}
+}
+
+func TestEvalDiscardOutput(t *testing.T) {
+	tests := map[string]struct {
+		query, format, expected string
+		params                  evalCommandParams
+	}{
+		"success example": {
+			query: "1*2+3",
+			params: func() evalCommandParams {
+				params := newEvalCommandParams()
+				err := params.outputFormat.Set(evalDiscardOutput)
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				return params
+			}(),
+			expected: `{
+  "result": "discarded"
+}
+`},
+		"error example": {
+			query: "1/0",
+			params: func() evalCommandParams {
+				params := newEvalCommandParams()
+				err := params.outputFormat.Set(evalDiscardOutput)
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				return params
+			}(),
+			expected: `{}
+`},
+		"error example show built-in-errors": {
+			query: "1/0",
+			params: func() evalCommandParams {
+				params := newEvalCommandParams()
+				err := params.outputFormat.Set(evalDiscardOutput)
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				params.showBuiltinErrors = true
+				return params
+			}(),
+			expected: `{
+  "errors": [
+    {
+      "code": "eval_builtin_error",
+      "location": {
+        "col": 1,
+        "file": "",
+        "row": 1
+      },
+      "message": "div: divide by zero"
+    }
+  ]
+}
+`},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			_, err := eval([]string{tc.query}, tc.params, &buf)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			if actual := buf.String(); actual != tc.expected {
+				t.Errorf("expected output %q\ngot %q", tc.expected, actual)
+			}
+		})
+	}
+}
+
+func TestEvalDiscardProfilerOutput(t *testing.T) {
+	params := newEvalCommandParams()
+	err := params.outputFormat.Set(evalDiscardOutput)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	params.profile = true
+
+	query := "1*2+3"
+
+	var buf bytes.Buffer
+	_, err = eval([]string{query}, params, &buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	var output map[string]interface{}
+	if err := util.NewJSONDecoder(&buf).Decode(&output); err != nil {
+		t.Fatal(err)
+	}
+
+	// assert that the result is set to discarded
+	result, ok := output["result"].(string)
+	if !ok {
+		t.Fatal("error extracting result as string from output")
+	}
+
+	if result != "discarded" {
+		t.Fatal("Expected result field to be set to 'discarded'")
+	}
+
+	// assert that profile is still set
+	_, ok = output["profile"]
+	if !ok {
+		t.Fatal("error in parsing profile output")
 	}
 }
 

@@ -608,6 +608,65 @@ func TestRegoDisableIndexing(t *testing.T) {
 	}
 }
 
+func TestRegoDisableIndexingWithMatch(t *testing.T) {
+	tracer := topdown.NewBufferTracer()
+	mod := `
+	package test
+
+	p {
+		input.x = 1
+	}
+
+	p {
+		input.y = 1
+	}
+	`
+	pq, err := New(
+		Query("data"),
+		Module("foo.rego", mod),
+	).PrepareForEval(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error %s", err)
+	}
+
+	rs, err := pq.Eval(
+		context.Background(),
+		EvalQueryTracer(tracer),
+		EvalRuleIndexing(false),
+		EvalInput(map[string]interface{}{"x": 1}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error %s", err)
+	}
+
+	assertResultSet(t, rs, `[[{"test": {"p": true}}]]`)
+
+	var evalNodes []string
+	for _, e := range *tracer {
+		if e.Op == topdown.EvalOp {
+			evalNodes = append(evalNodes, string(e.Node.Loc().Text))
+		}
+	}
+
+	expectedEvalNodes := []string{
+		"input.x = 1",
+		"input.y = 1",
+	}
+
+	for _, expected := range expectedEvalNodes {
+		found := false
+		for _, actual := range evalNodes {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Missing expected eval node in trace: %q\nGot: %q\n", expected, evalNodes)
+		}
+	}
+}
+
 func TestRegoCatchPathConflicts(t *testing.T) {
 	r := New(
 		Query("data"),
@@ -935,6 +994,29 @@ func TestPrepareAndEvalOriginal(t *testing.T) {
 	// as expected for Eval.
 
 	assertEval(t, r, "[[2]]")
+}
+
+func TestPrepareAndEvalOnlyOneErrorOccurredPrintOnce(t *testing.T) {
+	module := `
+	package test
+    package test
+	x = input.y
+	`
+
+	r := New(
+		Query("data.test.x"),
+		Module("", module),
+		Package("foo"),
+		Input(map[string]int{"y": 2}),
+	)
+
+	_, err := r.PrepareForEval(context.Background())
+	if err == nil {
+		t.Fatal("Expected error but got nil")
+	}
+	if strings.Count(err.Error(), "1 error occurred") > 1 {
+		t.Fatalf("Expected to print '1 error occurred' only once")
+	}
 }
 
 func TestPrepareAndEvalNewPrintHook(t *testing.T) {
@@ -2373,7 +2455,7 @@ func TestGenerateJSON(t *testing.T) {
 	r := New(
 		Query("input"),
 		Input("original-input"),
-		GenerateJSON(func(t *ast.Term, ectx *EvalContext) (interface{}, error) {
+		GenerateJSON(func(*ast.Term, *EvalContext) (interface{}, error) {
 			return "converted-input", nil
 		}),
 	)

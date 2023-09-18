@@ -1,5 +1,6 @@
-{{ $docsHome   := .CurrentSection }}
-{{ $allDocs    := where site.RegularPages "Section" "docs" }}
+{{ $docsVersionBasePath := printf "%s" (delimit (first 3 (split .RelPermalink "/")) "/") }}
+{{ $docsHome   := $.GetPage $docsVersionBasePath }}
+{{ $allDocs    := where $docsHome.Pages "Section" "docs" }}
 {{ $docs       := where $allDocs ".Params.kind" "eq" "documentation" }}
 {{ $kubernetes := where $allDocs ".Params.kind" "eq" "kubernetes" }}
 {{ $envoy      := where $allDocs ".Params.kind" "eq" "envoy" }}
@@ -7,11 +8,13 @@
 {{ $operations := where $allDocs ".Params.kind" "eq" "operations" }}
 {{ $management := where $allDocs ".Params.kind" "eq" "management" }}
 {{ $contrib    := where $allDocs ".Params.kind" "eq" "contrib" }}
-{{ $misc       := where $allDocs ".Params.kind" "eq" "misc" }}
+{{/* Drop all ecosystem pages in historic versions in favor of hard coded link below */}}
+{{ $misc       := where (where $allDocs ".Params.kind" "eq" "misc") ".Title" "ne" "Ecosystem" }}
+{{ $support    := where (where (where $allDocs ".Params.kind" "eq" "support") ".Title" "ne" "Ecosystem") ".Title" "ne" "OPA Ecosystem" }}
 {{ $pageUrl    := .Permalink }}
 {{ $isDocsHome := eq .Permalink $docsHome.Permalink }}
 {{ $version    := index (split .File.Path "/") 1 }}
-{{ $latest     := index site.Data.releases 1 }}
+{{ $latest     := index $.Site.Data.releases 1 }}
 
 <span class="docs-nav-title">
   Core Docs
@@ -49,16 +52,7 @@
 
 {{ partial "docs/sidenav-section.html" ( dict "ctx" . "sectionTitle" "Miscellaneous" "section" $misc "pageUrl" $pageUrl "version" $version ) }}
 
-<a class="docs-nav-item" href="https://play.openpolicyagent.org/">
-  Rego Playground
-</a>
+{{ partial "docs/sidenav-section.html" ( dict "ctx" . "sectionTitle" "Support" "section" $support "pageUrl" $pageUrl "version" $version ) }}
 
-<hr class="docs-nav-hr" />
-
-<span class="docs-nav-title">
-  Community
-</span>
-
-<a class="docs-nav-item" href="/support">
-  Enterprise and Commercial
-</a>
+<a class="docs-nav-item" href="/ecosystem">OPA Ecosystem</a>
+<a class="docs-nav-item" href="/support">Enterprise</a>

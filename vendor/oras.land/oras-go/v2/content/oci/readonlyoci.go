@@ -36,7 +36,7 @@ import (
 
 // ReadOnlyStore implements `oras.ReadonlyTarget`, and represents a read-only
 // content store based on file system with the OCI-Image layout.
-// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc2/image-layout.md
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md
 type ReadOnlyStore struct {
 	fsys        fs.FS
 	storage     content.ReadOnlyStorage
@@ -57,7 +57,7 @@ func NewFromFS(ctx context.Context, fsys fs.FS) (*ReadOnlyStore, error) {
 		return nil, fmt.Errorf("invalid OCI Image Layout: %w", err)
 	}
 	if err := store.loadIndexFile(ctx); err != nil {
-		return nil, fmt.Errorf("invalid OCI Image Layout: %w", err)
+		return nil, fmt.Errorf("invalid OCI Image Index: %w", err)
 	}
 
 	return store, nil
@@ -83,7 +83,11 @@ func (s *ReadOnlyStore) Exists(ctx context.Context, target ocispec.Descriptor) (
 	return s.storage.Exists(ctx, target)
 }
 
-// Resolve resolves a reference to a descriptor.
+// Resolve resolves a reference to a descriptor. If the reference to be resolved
+// is a tag, the returned descriptor will be a full descriptor declared by
+// github.com/opencontainers/image-spec/specs-go/v1. If the reference is a
+// digest the returned descriptor will be a plain descriptor (containing only
+// the digest, media type and size).
 func (s *ReadOnlyStore) Resolve(ctx context.Context, reference string) (ocispec.Descriptor, error) {
 	if reference == "" {
 		return ocispec.Descriptor{}, errdef.ErrMissingReference
@@ -98,7 +102,12 @@ func (s *ReadOnlyStore) Resolve(ctx context.Context, reference string) (ocispec.
 		}
 		return ocispec.Descriptor{}, err
 	}
-	return descriptor.Plain(desc), nil
+
+	if reference == desc.Digest.String() {
+		return descriptor.Plain(desc), nil
+	}
+
+	return desc, nil
 }
 
 // Predecessors returns the nodes directly pointing to the current node.
@@ -161,7 +170,7 @@ func (s *ReadOnlyStore) loadIndexFile(ctx context.Context) error {
 // loadIndex loads index into memory.
 func loadIndex(ctx context.Context, index *ocispec.Index, fetcher content.Fetcher, tagger content.Tagger, graph *graph.Memory) error {
 	for _, desc := range index.Manifests {
-		if err := tagger.Tag(ctx, desc, desc.Digest.String()); err != nil {
+		if err := tagger.Tag(ctx, deleteAnnotationRefName(desc), desc.Digest.String()); err != nil {
 			return err
 		}
 		if ref := desc.Annotations[ocispec.AnnotationRefName]; ref != "" {
@@ -223,4 +232,28 @@ func listTags(ctx context.Context, tagResolver *resolver.Memory, last string, fn
 	sort.Strings(tags)
 
 	return fn(tags)
+}
+
+// deleteAnnotationRefName deletes the AnnotationRefName from the annotation map
+// of desc.
+func deleteAnnotationRefName(desc ocispec.Descriptor) ocispec.Descriptor {
+	if _, ok := desc.Annotations[ocispec.AnnotationRefName]; !ok {
+		// no ops
+		return desc
+	}
+
+	size := len(desc.Annotations) - 1
+	if size == 0 {
+		desc.Annotations = nil
+		return desc
+	}
+
+	annotations := make(map[string]string, size)
+	for k, v := range desc.Annotations {
+		if k != ocispec.AnnotationRefName {
+			annotations[k] = v
+		}
+	}
+	desc.Annotations = annotations
+	return desc
 }

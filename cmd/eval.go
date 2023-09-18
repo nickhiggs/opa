@@ -82,6 +82,7 @@ func newEvalCommandParams() evalCommandParams {
 			evalPrettyOutput,
 			evalSourceOutput,
 			evalRawOutput,
+			evalDiscardOutput,
 		}),
 		explain:         newExplainFlag([]string{explainModeOff, explainModeFull, explainModeNotes, explainModeFails, explainModeDebug}),
 		target:          util.NewEnumFlag(compile.TargetRego, []string{compile.TargetRego, compile.TargetWasm}),
@@ -142,6 +143,7 @@ const (
 	evalPrettyOutput   = "pretty"
 	evalSourceOutput   = "source"
 	evalRawOutput      = "raw"
+	evalDiscardOutput  = "discard"
 
 	// number of profile results to return by default
 	defaultProfileLimit = 10
@@ -232,6 +234,7 @@ Set the output format with the --format flag.
     --format=pretty    : output query results in a human-readable format
     --format=source    : output partial evaluation results in a source format
     --format=raw       : output the values from query results in a scripting friendly format
+    --format=discard   : output the result field as "discarded" when non-nil
 
 Schema
 ------
@@ -294,7 +297,7 @@ access.
 	evalCommand.Flags().BoolVarP(&params.showBuiltinErrors, "show-builtin-errors", "", false, "collect and return all encountered built-in errors, built in errors are not fatal")
 	evalCommand.Flags().BoolVarP(&params.instrument, "instrument", "", false, "enable query instrumentation metrics (implies --metrics)")
 	evalCommand.Flags().BoolVarP(&params.profile, "profile", "", false, "perform expression profiling")
-	evalCommand.Flags().VarP(&params.profileCriteria, "profile-sort", "", "set sort order of expression profiler results")
+	evalCommand.Flags().VarP(&params.profileCriteria, "profile-sort", "", "set sort order of expression profiler results. Accepts: total_time_ns, num_eval, num_redo, num_gen_expr, file, line. This flag can be repeated.")
 	evalCommand.Flags().VarP(&params.profileLimit, "profile-limit", "", "set number of profiling results to show")
 	evalCommand.Flags().VarP(&params.prettyLimit, "pretty-limit", "", "set limit after which pretty output gets truncated")
 	evalCommand.Flags().BoolVarP(&params.failDefined, "fail-defined", "", false, "exits with non-zero exit code on defined/non-empty result and errors")
@@ -394,6 +397,8 @@ func eval(args []string, params evalCommandParams, w io.Writer) (bool, error) {
 		err = pr.Source(w, result)
 	case evalRawOutput:
 		err = pr.Raw(w, result)
+	case evalDiscardOutput:
+		err = pr.Discard(w, result)
 	default:
 		err = pr.JSON(w, result)
 	}

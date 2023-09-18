@@ -60,23 +60,25 @@ represents a policy decision returned by OPA.
 
 Decision log updates contain the following fields:
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `[_].labels` | `object` | Set of key-value pairs that uniquely identify the OPA instance. |
-| `[_].decision_id` | `string` | Unique identifier generated for each decision for traceability. |
-| `[_].bundles` | `object` | Set of key-value pairs describing the bundles which contained policy used to produce the decision. |
-| `[_].bundles[_].revision` | `string` | Revision of the bundle at the time of evaluation. |
-| `[_].path` | `string` | Hierarchical policy decision path, e.g., `/http/example/authz/allow`. Receivers should tolerate slash-prefixed paths. |
-| `[_].query` | `string` | Ad-hoc Rego query received by Query API. |
-| `[_].input` | `any` | Input data provided in the policy query. |
-| `[_].result` | `any` | Policy decision returned to the client, e.g., `true` or `false`. |
-| `[_].requested_by` | `string` | Identifier for client that executed policy query, e.g., the client address. |
-| `[_].timestamp` | `string` | RFC3999 timestamp of policy decision. |
-| `[_].metrics` | `object` | Key-value pairs of [performance metrics](../rest-api#performance-metrics). |
-| `[_].erased` | `array[string]` | Set of JSON Pointers specifying fields in the event that were erased. |
-| `[_].masked` | `array[string]` | Set of JSON Pointers specifying fields in the event that were masked. |
-| `[_].nd_builtin_cache` | `object` | Key-value pairs of non-deterministic builtin names, paired with objects specifying the input/output mappings for each unique invocation of that builtin during policy evaluation. Intended for use in debugging and decision replay. Receivers will need to decode the JSON using Rego's JSON decoders. |
-| `[_].req_id` | `number` | Incremental request identifier, and unique only to the OPA instance, for the request that started the policy query. The attribute value is the same as the value present in others logs (request, response, and print) and could be used to correlate them all. This attribute will be included just when OPA runtime is initialized in server mode and the log level is equal to or greater than info. |
+| Field                     | Type | Description                                                                                                                                                                                                                                                                                                                                                                                            |
+|---------------------------| --- |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `[_].labels`              | `object` | Set of key-value pairs that uniquely identify the OPA instance.                                                                                                                                                                                                                                                                                                                                        |
+| `[_].decision_id`         | `string` | Unique identifier generated for each decision for traceability.                                                                                                                                                                                                                                                                                                                                        |
+| `[_].trace_id`            | `string` | Unique identifier of a trace generated for each incoming request for traceability. This is a hex string representation compliant with the W3C trace-context specification. See more at https://www.w3.org/TR/trace-context/#trace-id.                                                                                                                                                                  |
+| `[_].span_id`             | `string` | Unique identifier of a span in a trace to assist traceability. This is a hex string representation compliant with the W3C trace-context specification. See more at https://www.w3.org/TR/trace-context/#parent-id.                                                                                                                                                                                                                                                                                                                                         |
+| `[_].bundles`             | `object` | Set of key-value pairs describing the bundles which contained policy used to produce the decision.                                                                                                                                                                                                                                                                                                     |
+| `[_].bundles[_].revision` | `string` | Revision of the bundle at the time of evaluation.                                                                                                                                                                                                                                                                                                                                                      |
+| `[_].path`                | `string` | Hierarchical policy decision path, e.g., `/http/example/authz/allow`. Receivers should tolerate slash-prefixed paths.                                                                                                                                                                                                                                                                                  |
+| `[_].query`               | `string` | Ad-hoc Rego query received by Query API.                                                                                                                                                                                                                                                                                                                                                               |
+| `[_].input`               | `any` | Input data provided in the policy query.                                                                                                                                                                                                                                                                                                                                                               |
+| `[_].result`              | `any` | Policy decision returned to the client, e.g., `true` or `false`.                                                                                                                                                                                                                                                                                                                                       |
+| `[_].requested_by`        | `string` | Identifier for client that executed policy query, e.g., the client address.                                                                                                                                                                                                                                                                                                                            |
+| `[_].timestamp`           | `string` | RFC3999 timestamp of policy decision.                                                                                                                                                                                                                                                                                                                                                                  |
+| `[_].metrics`             | `object` | Key-value pairs of [performance metrics](../rest-api#performance-metrics).                                                                                                                                                                                                                                                                                                                             |
+| `[_].erased`              | `array[string]` | Set of JSON Pointers specifying fields in the event that were erased.                                                                                                                                                                                                                                                                                                                                  |
+| `[_].masked`              | `array[string]` | Set of JSON Pointers specifying fields in the event that were masked.                                                                                                                                                                                                                                                                                                                                  |
+| `[_].nd_builtin_cache`    | `object` | Key-value pairs of non-deterministic builtin names, paired with objects specifying the input/output mappings for each unique invocation of that builtin during policy evaluation. Intended for use in debugging and decision replay. Receivers will need to decode the JSON using Rego's JSON decoders.                                                                                                |
+| `[_].req_id`              | `number` | Incremental request identifier, and unique only to the OPA instance, for the request that started the policy query. The attribute value is the same as the value present in others logs (request, response, and print) and could be used to correlate them all. This attribute will be included just when OPA runtime is initialized in server mode and the log level is equal to or greater than info. |
 
 If the decision log was successfully uploaded to the remote service, it should respond with an HTTP 2xx status. If the
 service responds with a non-2xx status, OPA will requeue the last chunk containing decision log events and upload it
@@ -256,34 +258,40 @@ to track **remove** vs **upsert** mask operations.
 
 ### Drop Decision Logs
 
-Drop rules filters all decisions, which evaluate to `true`, before logging them.
+Drop rules filters all decisions from logging where the rule evaluates to `true`. 
 
 This rule will drop all requests to the _allow_ rule in the _kafka_ package, that returned _true_:
 ```live:drop_rule_example/kafka_allow_rule:module:read_only
 package system.log
 
-drop {
-  input.path == "kafka/allow"
-  input.result == true
+import future.keywords.if
+
+drop if {
+    input.path == "kafka/allow"
+    input.result == true
 }
 ```
 
-Log only requests for _delete_ and _alter_ operations (Kafka with opa-kafka-authorizer):
+Log only requests for _delete_ and _alter_ operations
+(Kafka with the [opa-kafka-plugin](https://github.com/StyraInc/opa-kafka-plugin)):
 
 ```live:drop_rule_example/log_only_delete_alter_operations:module:read_only
 package system.log
 
+import future.keywords.if
 import future.keywords.in
 
-drop {
-  input.path == "kafka/allow"
-  not input.input.action.operation in {"DELETE", "ALTER"}
+drop if {
+    input.path == "kafka/allow"
+    not input.input.action.operation in {"DELETE", "ALTER"}
+}
 ```
 
-The name of the drop rules by default is `drop` in the package `system.log`. It can be changed with the configuration property `decision_logs.drop_decision`.
+The name of the drop rules by default is `drop` in the package `system.log`. It can be changed with the configuration
+property `decision_logs.drop_decision`.
 ```yaml
 decision_logs:
-    drop_decision: /system/log/drop
+  drop_decision: /system/log/drop
 ```
 
 ### Rate Limiting Decision Logs
@@ -294,3 +302,10 @@ allow the service to consume logs without being overwhelmed. The `max_decisions_
 to set the maximum number of decision log events to buffer per second. OPA will drop events if the rate limit is exceeded.
 This option provides users more control over how OPA buffers log events and is an effective mechanism to make sure the
 service can successfully process incoming log events.
+
+## Ecosystem Projects
+
+Decision Logging is an important feature of OPA which supports, in particular, auditing and debugging. The following OPA
+ecosystem projects implement functionality related to Decision Logging:
+
+{{< ecosystem_feature_embed key="decision-logging" topic="Decision Logging" >}}

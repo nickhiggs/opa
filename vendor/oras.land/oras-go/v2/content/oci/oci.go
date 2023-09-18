@@ -14,7 +14,7 @@ limitations under the License.
 */
 
 // Package oci provides access to an OCI content store.
-// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc2/image-layout.md
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md
 package oci
 
 import (
@@ -27,10 +27,12 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/errdef"
+	"oras.land/oras-go/v2/internal/container/set"
 	"oras.land/oras-go/v2/internal/descriptor"
 	"oras.land/oras-go/v2/internal/graph"
 	"oras.land/oras-go/v2/internal/resolver"
@@ -38,12 +40,17 @@ import (
 
 // ociImageIndexFile is the file name of the index
 // from the OCI Image Layout Specification.
-// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc2/image-layout.md#indexjson-file
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md#indexjson-file
 const ociImageIndexFile = "index.json"
+
+// ociBlobsDir is the name of the blobs directory
+// from the OCI Image Layout Specification.
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md#content
+const ociBlobsDir = "blobs"
 
 // Store implements `oras.Target`, and represents a content store
 // based on file system with the OCI-Image layout.
-// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc2/image-layout.md
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md
 type Store struct {
 	// AutoSaveIndex controls if the OCI store will automatically save the index
 	// file on each Tag() call.
@@ -88,14 +95,14 @@ func NewWithContext(ctx context.Context, root string) (*Store, error) {
 		graph:         graph.NewMemory(),
 	}
 
-	if err := ensureDir(rootAbs); err != nil {
+	if err := ensureDir(filepath.Join(rootAbs, ociBlobsDir)); err != nil {
 		return nil, err
 	}
 	if err := store.ensureOCILayoutFile(); err != nil {
 		return nil, fmt.Errorf("invalid OCI Image Layout: %w", err)
 	}
 	if err := store.loadIndexFile(ctx); err != nil {
-		return nil, fmt.Errorf("invalid OCI Image Layout: %w", err)
+		return nil, fmt.Errorf("invalid OCI Image Index: %w", err)
 	}
 
 	return store, nil
@@ -128,7 +135,7 @@ func (s *Store) Exists(ctx context.Context, target ocispec.Descriptor) (bool, er
 
 // Tag tags a descriptor with a reference string.
 // reference should be a valid tag (e.g. "latest").
-// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc2/image-layout.md#indexjson-file
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc4/image-layout.md#indexjson-file
 func (s *Store) Tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
 	if err := validateReference(reference); err != nil {
 		return err
@@ -142,10 +149,6 @@ func (s *Store) Tag(ctx context.Context, desc ocispec.Descriptor, reference stri
 		return fmt.Errorf("%s: %s: %w", desc.Digest, desc.MediaType, errdef.ErrNotFound)
 	}
 
-	if desc.Annotations == nil {
-		desc.Annotations = map[string]string{}
-	}
-	desc.Annotations[ocispec.AnnotationRefName] = reference
 	return s.tag(ctx, desc, reference)
 }
 
@@ -153,7 +156,7 @@ func (s *Store) Tag(ctx context.Context, desc ocispec.Descriptor, reference stri
 func (s *Store) tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
 	dgst := desc.Digest.String()
 	if reference != dgst {
-		// mark desc for deduplication in SaveIndex()
+		// also tag desc by its digest
 		if err := s.tagResolver.Tag(ctx, desc, dgst); err != nil {
 			return err
 		}
@@ -167,7 +170,11 @@ func (s *Store) tag(ctx context.Context, desc ocispec.Descriptor, reference stri
 	return nil
 }
 
-// Resolve resolves a reference to a descriptor.
+// Resolve resolves a reference to a descriptor. If the reference to be resolved
+// is a tag, the returned descriptor will be a full descriptor declared by
+// github.com/opencontainers/image-spec/specs-go/v1. If the reference is a
+// digest the returned descriptor will be a plain descriptor (containing only
+// the digest, media type and size).
 func (s *Store) Resolve(ctx context.Context, reference string) (ocispec.Descriptor, error) {
 	if reference == "" {
 		return ocispec.Descriptor{}, errdef.ErrMissingReference
@@ -182,7 +189,12 @@ func (s *Store) Resolve(ctx context.Context, reference string) (ocispec.Descript
 		}
 		return ocispec.Descriptor{}, err
 	}
-	return descriptor.Plain(desc), nil
+
+	if reference == desc.Digest.String() {
+		return descriptor.Plain(desc), nil
+	}
+
+	return desc, nil
 }
 
 // Predecessors returns the nodes directly pointing to the current node.
@@ -269,14 +281,32 @@ func (s *Store) SaveIndex() error {
 	defer s.indexLock.Unlock()
 
 	var manifests []ocispec.Descriptor
+	tagged := set.New[digest.Digest]()
 	refMap := s.tagResolver.Map()
+
+	// 1. Add descriptors that are associated with tags
+	// Note: One descriptor can be associated with multiple tags.
 	for ref, desc := range refMap {
-		if ref == desc.Digest.String() && desc.Annotations[ocispec.AnnotationRefName] != "" {
-			// skip saving desc if ref is a digest and desc is tagged
-			continue
+		if ref != desc.Digest.String() {
+			annotations := make(map[string]string, len(desc.Annotations)+1)
+			for k, v := range desc.Annotations {
+				annotations[k] = v
+			}
+			annotations[ocispec.AnnotationRefName] = ref
+			desc.Annotations = annotations
+			manifests = append(manifests, desc)
+			// mark the digest as tagged for deduplication in step 2
+			tagged.Add(desc.Digest)
 		}
-		manifests = append(manifests, desc)
 	}
+	// 2. Add descriptors that are not associated with any tag
+	for ref, desc := range refMap {
+		if ref == desc.Digest.String() && !tagged.Contains(desc.Digest) {
+			// skip tagged ones since they have been added in step 1
+			manifests = append(manifests, deleteAnnotationRefName(desc))
+		}
+	}
+
 	s.index.Manifests = manifests
 	return s.writeIndexFile()
 }

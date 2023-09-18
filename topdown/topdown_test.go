@@ -21,8 +21,7 @@ import (
 	"time"
 
 	"github.com/open-policy-agent/opa/format"
-
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 
 	iCache "github.com/open-policy-agent/opa/topdown/cache"
 
@@ -1058,6 +1057,12 @@ func loadSmallTestData() map[string]interface{} {
 func setTime(t time.Time) func(*Query) *Query {
 	return func(q *Query) *Query {
 		return q.WithTime(t)
+	}
+}
+
+func setInterQueryCache(c iCache.InterQueryCache) func(*Query) *Query {
+	return func(q *Query) *Query {
+		return q.WithInterQueryBuiltinCache(c)
 	}
 }
 

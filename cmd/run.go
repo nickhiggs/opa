@@ -167,10 +167,16 @@ The 'run' command can ONLY be used with the --bundle flag to verify signatures
 for existing bundle files or directories following the bundle structure.
 
 To skip bundle verification, use the --skip-verify flag.
+
+The --watch flag can be used to monitor policy and data file-system changes. When a change is detected, the updated policy
+and data is reloaded into OPA. Watching individual files (rather than directories) is generally not recommended as some
+updates might cause them to be dropped by OPA.
 `,
+
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := context.Background()
-			rt, err := initRuntime(ctx, cmdParams, args)
+			addrSetByUser := cmd.Flags().Changed("addr")
+			rt, err := initRuntime(ctx, cmdParams, args, addrSetByUser)
 			if err != nil {
 				fmt.Println("error:", err)
 				os.Exit(1)
@@ -185,6 +191,7 @@ To skip bundle verification, use the --skip-verify flag.
 	runCommand.Flags().StringVarP(&cmdParams.rt.HistoryPath, "history", "H", historyPath(), "set path of history file")
 	cmdParams.rt.Addrs = runCommand.Flags().StringSliceP("addr", "a", []string{defaultAddr}, "set listening address of the server (e.g., [ip]:<port> for TCP, unix://<path> for UNIX domain socket)")
 	cmdParams.rt.DiagnosticAddrs = runCommand.Flags().StringSlice("diagnostic-addr", []string{}, "set read-only diagnostic listening address of the server for /health and /metric APIs (e.g., [ip]:<port> for TCP, unix://<path> for UNIX domain socket)")
+	cmdParams.rt.UnixSocketPerm = runCommand.Flags().String("unix-socket-perm", "755", "specify the permissions for the Unix domain socket if used to listen for incoming connections")
 	runCommand.Flags().BoolVar(&cmdParams.rt.H2CEnabled, "h2c", false, "enable H2C for HTTP listeners")
 	runCommand.Flags().StringVarP(&cmdParams.rt.OutputFormat, "format", "f", "pretty", "set shell output format, i.e, pretty, json")
 	runCommand.Flags().BoolVarP(&cmdParams.rt.Watch, "watch", "w", false, "watch command line files for changes")
@@ -236,7 +243,7 @@ Flags:
 	RootCommand.AddCommand(runCommand)
 }
 
-func initRuntime(ctx context.Context, params runCmdParams, args []string) (*runtime.Runtime, error) {
+func initRuntime(ctx context.Context, params runCmdParams, args []string, addrSetByUser bool) (*runtime.Runtime, error) {
 	authenticationSchemes := map[string]server.AuthenticationScheme{
 		"token": server.AuthenticationToken,
 		"tls":   server.AuthenticationTLS,
@@ -316,6 +323,7 @@ func initRuntime(ctx context.Context, params runCmdParams, args []string) (*runt
 	}
 
 	rt.SetDistributedTracingLogging()
+	rt.Params.AddrSetByUser = addrSetByUser
 
 	return rt, nil
 }

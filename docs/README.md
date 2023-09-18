@@ -1,8 +1,8 @@
 # The OPA Website and Documentation
+
 The content and tooling is separated into a few places:
 
 [devel/](./devel/) - Developer documentation for OPA (not part of the website)
-
 
 [website/](./website/) - This directory contains all of the Markdown, HTML, Sass/CSS,
 and other assets needed to build the [openpolicyagent.org](https://openpolicyagent.org)
@@ -10,12 +10,12 @@ website. See the section below for steps to build the site and test documentatio
 locally. This content is not versioned for each release, it is common scaffolding for
 the website.
 
-[content/](./content/) - The raw OPA documentation can be found under the 
+[content/](./content/) - The raw OPA documentation can be found under the
 directory. This content is versioned for each release and should have all images
 and code snippets alongside the markdown content files.
 
-[website/data/integrations.yaml](./website/data/integrations.yaml) - Source for the
-integrations index. See [Integration Index](#integration-index) below for more details.
+[content/integrations/](./content/integrations) - Source for the
+OPA Ecosystem page. See [OPA Ecosystem](#opa-ecosystem) below for more details.
 
 ## Website Components
 
@@ -40,16 +40,32 @@ and are build into a `_redirects` file when the Hugo build happens via
 ## Site updates
 
 The OPA site is automatically published using [Netlify](https://netlify.com). Whenever
-changes in this directory are pushed to `master`, the site will be re-built and
+changes in this directory are pushed to `main`, the site will be re-built and
 re-deployed.
 
+**Note:** The site is built for many versions of the docs, this introduces some
+complexities to be aware of when making changes to the site's layout:
+
+* Updates to the [site's templates or styles/](./website/) are applied to all versions
+  (edge, latest and all versions) when merged to `main`.
+* Site [data](./website/data) treated in the same way, so updates to data files also
+  apply to all versions as soon as they are merged.
+* Docs [content/](./content/), when merged to `main`, is only shown on `edge` until the
+  next release.
+* Other, unversioned [content/](./website/content/) is shown immediately after merging.
+  This includes pages in the [OPA Ecosystem](https://www.openpolicyagent.org/ecosystem/)
+  as well as [Security](https://www.openpolicyagent.org/security/),
+  [Support](https://www.openpolicyagent.org/support/), and
+  [Community](https://www.openpolicyagent.org/community/) pages.
+
 ## How to Edit and Test
+
 ### Preview Markdown `content` (*.md)
 
 The majority of this can be done with any markdown renderer (typically built into or
 via a plug-in for IDEs and editors). The rendered output will be very similar to what Hugo will
 generate.
- 
+
 > This excludes the Hugo shortcodes (places with `{{< SHORT_CODE >}}` in the markdown.
   To see the output of these you'll need to involve Hugo. Additionally, to validate
   and view live code blocks, a full site preview is required.
@@ -80,8 +96,8 @@ using the non-extended version:
 error: failed to transform resource: TOCSS: failed to transform "sass/style.sass" (text/x-sass): this feature is not available in your current Hugo version
 ```
 
-Please also note that the current version of Hugo (e.g. installed with `brew install hugo`) is 
-not compatible with the docs. If you get errors like this, it means that you're using the 
+Please also note that the current version of Hugo (e.g. installed with `brew install hugo`) is
+not compatible with the docs. If you get errors like this, it means that you're using the
 wrong version:
 
 ```
@@ -102,10 +118,9 @@ This option provides the best preview of the site content, using the exact same 
 1) Deploy the site on Netlify using local content via the `make docs-serve-remote`. Follow any prompts the `netlify`
    tool asks. If you have not already linked the site select `Create & configure a new site` and specify your personal
    user account (which should have been configured in the previous step).
-   
+
 1) Netlify will then upload the built content and serve it via their CDN. A URL to the preview will be given in the
    CLI console output. Be sure to select the `edge` version within the Documentation pages to see your reflected changes in the remote site.
-
 
 #### Local Preview via `netlify dev`
 
@@ -120,7 +135,6 @@ than deploying remotely as the content does not need to be uploaded to the Netli
 > the version of the CLI tool and how in-sync that is with the actual Netlify infrastructure. A common issue is
 > with the redirects not working as expected locally, but working correctly on the "live" site in production.
 > When in doubt use the "remote" Netlify preview to verify behavior.
-
 
 ## Checking links
 
@@ -288,79 +302,90 @@ another group's module when evaluating (e.g. so that they can be imported).
 
 > If a query isn't specified for the output's group, when other modules are included the default becomes `data` instead of `data.<package name>`.
 
-# Integration Index
+# OPA Ecosystem
 
-The integration index makes it easy to find either a specific integration with OPA 
-or to browse the integrations with OPA within a particular category.  And it pulls 
-information about that integration (e.g. blogs, videos, tutorials, code) into a 
-single place while allowing integration authors to maintain the code wherever they like.  
+The [OPA Ecosystem](https://www.openpolicyagent.org/ecosystem/)
+makes it easy to find either a specific integration with OPA
+or to browse the integrations with OPA within a particular category. It pulls
+information about different integrations (e.g. blogs, videos, tutorials, code) into a
+single place while allowing integration authors to update the docs content as needed.
 
 ## Schema
 
-The schema of integrations.yaml has the following highlevel entries, each of which is self-explanatory.
-* integrations
-* organizations
-* software
+Source information for the OPA Ecosystem is stored in the following places:
 
-Each entry is an object where keys are unique identifiers for each subentry.  
-Organizations and Software are self-explanatory by inspection.  The schema for integrations is as follows.
+- [content/integrations/](./website/content/integrations) - each file creates a page in the OPA Ecosystem for a particular integration.
+- [content/organizations/](./website/content/organizations) - each file is a page for organizations and companies associated with integrations.
+- [content/softwares/](./website/content/softwares) - each file is for software categories related to integrations.
 
-* title: string
-* description: string
-* software: array of strings
-* labels: collection of key/value pairs.
-* tutorials: array of links
-* code: array of links
-* inventors: array of either
-  * string (organization name)
-  * object with fields
-    * name: string
-    * organization: string
-* videos: array of either
-  * link
-  * object with fields
-    * title: string
-    * speakers: array of name/organization objects
-    * venue: string
-    * link: string
-* blogs: array of links
+Integrations should have a file in `/docs/website/content/integrations/` with the following schema:
 
-The UI for this is currently hosted at [https://openpolicyagent.org/docs/latest/ecosystem/](https://openpolicyagent.org/docs/latest/ecosystem/)
+```md
+---
+title: <integration name>
+software:
+- <related software>
+- <related software>
+inventors:
+- <inventor name>
+- <inventor name>
+tutorials: # optional, links to tutorials for the integration
+- https://example.com/tutorial
+code: # optional, links to code for the integration
+- https://github.com/...
+blogs: # optional, links to blog posts for the integration
+- https://example.com/blog/1
+videos: # optional, links to videos for the integration
+- title: <video title>
+  speakers:
+  - name: <speaker name>
+    organization: <speaker organization>
+    venue: <venue>
+    link: <link>
+---
+Description of the integration (required)
+```
 
-The future plan is to use the following labels to generate categories of integrations.
+Any `inventor` that is not already in `content/organizations/` will need to be added too in `content/organizations/`.
+Organizations have the following format:
 
-* layer: which layer of the stack does this belong to
-* category: which kind of component within that layer is this
-* type: what kind of integration this is.  Either `enforcement` or `poweredbyopa`.  `enforcement` is the default 
-  if `type` is missing.  `poweredbyopa` is intended to be integrations built using OPA that are not tied to a 
-  particular layer of the stack.  This distinction is the most ambiguous and may change.
+```md
+---
+link: https://example.com
+title: <organization name>
+---
+```
 
-As of now the labels are only displayed for each entry.
+Any `software` that is not already in `content/softwares/` will need to be added too in `content/softwares/`.
+Software categories have the following format:
+
+```md
+---
+link: https://example.com
+title: <software name>
+---
+```
 
 ## Logos
 
-For each entry in the [integrations.yaml](./website/data/integrations.yaml)
-integrations section the UI will use a PNG or SVG logo with the same name as the key from
-[./website/static/img/logos/integrations](./website/static/img/logos/integrations)
+For each file in under [content/integrations/](./website/content/integrations) 
+a png or svg logo with the same name must be placed in `./website/static/img/logos/integrations`.
 
 For example:
 
-```yaml
-integrations:
-  my-cool-integration:
-    ...
+```md
+# content/integrations/my-cool-integration.md
 ```
 
-Would need a file called `my-cool-integration.png` at `./website/static/img/logos/integrations/my-cool-integration.png`
-(or `my-cool-integration.svg` in the same location).
-
-If it doesn't exist the OPA logo will be shown by default.
+Would need a file called `my-cool-integration.(png|svg)` at
+`./website/static/img/logos/integrations/my-cool-integration.(png|svg)`.
 
 ## Google Analytics
+
 With the addition of the feedback button, we are now able to see how many users found a particular page of the docs useful.
 
 To view the metrics you will need access to [Google Analytics](https://analytics.google.com/analytics/web/).
 
 Feedback responses can be found in the right hand tree under Behavior -> Events -> Top Events.
 
-From here you can set the desired time frame you wish to monitor. Then drill down into the helpful category to see the specific pages and how many clicks they received. 
+From here you can set the desired time frame you wish to monitor. Then drill down into the helpful category to see the specific pages and how many clicks they received.

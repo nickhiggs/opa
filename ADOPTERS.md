@@ -272,8 +272,6 @@ pre-production (in alphabetical order):
   automated code review, defining access levels or blocking execution of
   unwanted code.
 
-* [Wealthsimple](https://www.wealthsimple.com/) is using OPA to power all authorization checks their microservice ecosystem by leveraging their existing authorization library make the transition to OPA as simple as possible for development teams.
-
 * [Magda](https://github.com/magda-io/magda) is a federated, Kubernetes-based, open-source data catalog system. Working as Magda's central authorisation policy engine, OPA helps not only the API endpoint authorisation. Magda also uses its partial evaluation feature to translate datasets authorisation decisions to other database-specific DSLs (e.g. SQL or Elasticsearch DSL) and use them for dataset authorisation enforcement in different databases.
 
 Other adopters that have gone into production or various stages of
@@ -283,6 +281,7 @@ testing include:
 * [Nefeli Networks](https://nefeli.io)
 * [SolarWinds](https://www.solarwinds.com/) via [Lee Calcote](https://github.com/leecalcote)
 * [State Street Corporation](http://www.statestreet.com/)
+* [PITS Global Data Recovery Services](https://www.pitsdatarecovery.net/)
 
 If you have adopted OPA and would like to be included in this list,
 feel free to submit a PR updating this file or

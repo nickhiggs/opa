@@ -1611,6 +1611,14 @@ func TestRule(t *testing.T) {
 	assertParseErrorContains(t, "default invalid rule head builtin call", `default a = upper("foo")`, "illegal default rule (value cannot contain call)")
 	assertParseErrorContains(t, "default invalid rule head call", `default a = b`, "illegal default rule (value cannot contain var)")
 
+	assertParseErrorContains(t, "default invalid function head ref", `default f(x) = b.c.d`, "illegal default rule (value cannot contain ref)")
+	assertParseErrorContains(t, "default invalid function head call", `default f(x) = g(x)`, "illegal default rule (value cannot contain call)")
+	assertParseErrorContains(t, "default invalid function head builtin call", `default f(x) = upper("foo")`, "illegal default rule (value cannot contain call)")
+	assertParseErrorContains(t, "default invalid function head call", `default f(x) = b`, "illegal default rule (value cannot contain var)")
+	assertParseErrorContains(t, "default invalid function composite argument", `default f([x]) = 1`, "illegal default rule (arguments cannot contain array)")
+	assertParseErrorContains(t, "default invalid function number argument", `default f(1) = 1`, "illegal default rule (arguments cannot contain number)")
+	assertParseErrorContains(t, "default invalid function repeated vars", `default f(x, x) = 1`, "illegal default rule (arguments cannot be repeated x)")
+
 	assertParseError(t, "extra braces", `{ a := 1 }`)
 	assertParseError(t, "invalid rule name hyphen", `a-b = x { x := 1 }`)
 
@@ -2532,6 +2540,14 @@ else := 2
 			err: "else keyword cannot be used on rules with variables in head",
 		},
 		{
+			note: "single-value general ref head with var",
+			rule: `
+a.b[x].c := 1 if false
+else := 2
+`,
+			err: "else keyword cannot be used on rules with variables in head",
+		},
+		{
 			note: "single-value ref head with length 1 (last is var)",
 			rule: `
 a := 1 if false
@@ -3274,6 +3290,56 @@ func TestWildcards(t *testing.T) {
 		},
 		Body: NewBody(NewExpr(BooleanTerm(true))),
 	})
+}
+
+func TestRuleFromBodyJSONOptions(t *testing.T) {
+	tests := []string{
+		`pi = 3.14159`,
+		`p[x] { x = 1 }`,
+		`greeting = "hello"`,
+		`cores = [{0: 1}, {1: 2}]`,
+		`wrapper = cores[0][1]`,
+		`pi = [3, 1, 4, x, y, z]`,
+		`foo["bar"] = "buz"`,
+		`foo["9"] = "10"`,
+		`foo.buz = "bar"`,
+		`foo.fizz.buzz`,
+		`bar[1]`,
+		`bar[[{"foo":"baz"}]]`,
+		`bar.qux`,
+		`input = 1`,
+		`data = 2`,
+		`f(1) = 2`,
+		`f(1)`,
+		`d1 := 1234`,
+	}
+
+	parserOpts := ParserOptions{ProcessAnnotation: true}
+	parserOpts.JSONOptions = &JSONOptions{
+		MarshalOptions: JSONMarshalOptions{
+			IncludeLocation: NodeToggle{
+				Term:           true,
+				Package:        true,
+				Comment:        true,
+				Import:         true,
+				Rule:           true,
+				Head:           true,
+				Expr:           true,
+				SomeDecl:       true,
+				Every:          true,
+				With:           true,
+				Annotations:    true,
+				AnnotationsRef: true,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc, func(t *testing.T) {
+			testModule := "package a.b.c\n" + tc
+			assertParseModuleJSONOptions(t, tc, testModule, parserOpts)
+		})
+	}
 }
 
 func TestRuleModulePtr(t *testing.T) {
@@ -5051,6 +5117,53 @@ func assertParseModule(t *testing.T, msg string, input string, correct *Module, 
 		t.Errorf("Error on test %s: modules not equal: %v (parsed), %v (correct)", msg, m, correct)
 	}
 
+}
+
+func assertParseModuleJSONOptions(t *testing.T, msg string, input string, opts ...ParserOptions) {
+	opt := ParserOptions{}
+	if len(opts) == 1 {
+		opt = opts[0]
+	}
+	m, err := ParseModuleWithOpts("", input, opt)
+	if err != nil {
+		t.Errorf("Error on test \"%s\": parse error on %s: %s", msg, input, err)
+		return
+	}
+
+	if len(m.Rules) != 1 {
+		t.Fatalf("Error on test \"%s\": expected 1 rule but got %d", msg, len(m.Rules))
+	}
+
+	rule := m.Rules[0]
+	if rule.Head.jsonOptions != *opt.JSONOptions {
+		t.Fatalf("Error on test \"%s\": expected rule Head JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, rule.Head.jsonOptions)
+	}
+	if rule.Body[0].jsonOptions != *opt.JSONOptions {
+		t.Fatalf("Error on test \"%s\": expected rule Body JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, rule.Body[0].jsonOptions)
+	}
+	switch terms := rule.Body[0].Terms.(type) {
+	case []*Term:
+		for _, term := range terms {
+			if term.jsonOptions != *opt.JSONOptions {
+				t.Fatalf("Error on test \"%s\": expected body Term JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, term.jsonOptions)
+			}
+		}
+	case *SomeDecl:
+		if terms.jsonOptions != *opt.JSONOptions {
+			t.Fatalf("Error on test \"%s\": expected body Term JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, terms.jsonOptions)
+		}
+	case *Every:
+		if terms.jsonOptions != *opt.JSONOptions {
+			t.Fatalf("Error on test \"%s\": expected body Term JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, terms.jsonOptions)
+		}
+	case *Term:
+		if terms.jsonOptions != *opt.JSONOptions {
+			t.Fatalf("Error on test \"%s\": expected body Term JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, terms.jsonOptions)
+		}
+	}
+	if rule.jsonOptions != *opt.JSONOptions {
+		t.Fatalf("Error on test \"%s\": expected rule JSONOptions\n%v\n, got\n%v", msg, *opt.JSONOptions, rule.jsonOptions)
+	}
 }
 
 func assertParseModuleError(t *testing.T, msg, input string) {

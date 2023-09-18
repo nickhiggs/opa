@@ -18,13 +18,21 @@ static opa_array_t *__opa_set_values(opa_set_t *set);
 static void __opa_object_insert_elem(opa_object_t *obj, opa_object_elem_t *new, size_t hash);
 static void __opa_set_add_elem(opa_set_t *set, opa_set_elem_t *new, size_t hash);
 
+static void __opa_free_maybe_bulk(void *ptr, bool bulk)
+{
+	if (bulk)
+		opa_free_bulk(ptr);
+	else
+		opa_free(ptr);
+}
+
 OPA_INTERNAL
 int opa_value_type(opa_value *node)
 {
     // For all intents and purposes, interned strings are strings,
     // interned booleans are booleans.
     // Only opa_value_free and opa_value_shallow_copy handle them
-    // separately, by refering to node->type directly.
+    // separately, by referring to node->type directly.
     switch (node->type)
     {
     case OPA_STRING_INTERNED:
@@ -442,8 +450,8 @@ int opa_value_compare_object(opa_object_t *a, opa_object_t *b)
     }
 
 finish:
-    opa_array_free(a_keys);
-    opa_array_free(b_keys);
+    opa_array_free(a_keys, false, false);
+    opa_array_free(b_keys, false, false);
     return cmp;
 }
 
@@ -641,32 +649,45 @@ size_t opa_value_hash(opa_value *node) {
 }
 
 OPA_INTERNAL
-void opa_value_free(opa_value *node)
+void __opa_value_free(opa_value *node, bool deep, bool bulk)
 {
     switch (node->type) // bypass opa_value_type: don't free OPA_STRING_INTERNED
     {
     case OPA_NULL:
-        opa_free(node);
+        __opa_free_maybe_bulk(node, bulk);
         return;
     case OPA_BOOLEAN:
-        opa_free(opa_cast_boolean(node));
+        __opa_free_maybe_bulk(opa_cast_boolean(node), bulk);
         return;
     case OPA_NUMBER:
-        opa_number_free(opa_cast_number(node));
+        opa_number_free(opa_cast_number(node), bulk);
         return;
     case OPA_STRING:
-        opa_string_free(opa_cast_string(node));
+        opa_string_free(opa_cast_string(node), bulk);
         return;
     case OPA_ARRAY:
-        opa_array_free(opa_cast_array(node));
+        opa_array_free(opa_cast_array(node), deep, bulk);
         return;
     case OPA_OBJECT:
-        opa_object_free(opa_cast_object(node));
+        opa_object_free(opa_cast_object(node), deep, bulk);
         return;
     case OPA_SET:
-        opa_set_free(opa_cast_set(node));
+        opa_set_free(opa_cast_set(node), deep, bulk);
         return;
     }
+}
+
+OPA_INTERNAL
+WASM_EXPORT(opa_value_free)
+void opa_value_free(opa_value *node)
+{
+    __opa_value_free(node, true, false);
+}
+
+OPA_INTERNAL
+void opa_value_free_shallow(opa_value *node)
+{
+    __opa_value_free(node, false, false);
 }
 
 OPA_INTERNAL
@@ -934,17 +955,17 @@ void opa_number_init_int(opa_number_t *n, long long v)
     n->v.i = v;
 }
 
-void opa_number_free(opa_number_t *n)
+void opa_number_free(opa_number_t *n, bool bulk)
 {
     if (n->repr == OPA_NUMBER_REPR_REF)
     {
         if (n->v.ref.free)
         {
-            opa_free((void *)n->v.ref.s);
+            __opa_free_maybe_bulk((void *)n->v.ref.s, bulk);
         }
     }
 
-    opa_free(n);
+    __opa_free_maybe_bulk(n, bulk);
 }
 
 int opa_number_try_int(opa_number_t *n, long long *i)
@@ -1015,14 +1036,14 @@ opa_value *opa_string_allocated(const char *v, size_t len)
     return &ret->hdr;
 }
 
-void opa_string_free(opa_string_t *s)
+void opa_string_free(opa_string_t *s, bool bulk)
 {
     if (s->free)
     {
-        opa_free((void *)s->v);
+        __opa_free_maybe_bulk((void *)s->v, bulk);
     }
 
-    opa_free(s);
+    __opa_free_maybe_bulk(s, bulk);
 }
 
 void __opa_array_grow(opa_array_t *arr)
@@ -1145,19 +1166,24 @@ void opa_value_number_set_int(opa_value *v, long long i)
 	ret->v.i = i;
 }
 
-void opa_array_free(opa_array_t *arr)
+void opa_array_free(opa_array_t *arr, bool deep, bool bulk)
 {
     if (arr->elems != NULL)
     {
         for (size_t i = 0; i < arr->len; i++)
         {
-            opa_free(arr->elems[i].i);
+            if (deep) {
+                __opa_value_free(arr->elems[i].i, deep, bulk);
+                __opa_value_free(arr->elems[i].v, deep, bulk);
+            } else {
+                __opa_free_maybe_bulk(arr->elems[i].i, bulk);
+            }
         }
 
-        opa_free(arr->elems);
+        __opa_free_maybe_bulk(arr->elems, bulk);
     }
 
-    opa_free(arr);
+    __opa_free_maybe_bulk(arr, bulk);
 }
 
 OPA_INTERNAL
@@ -1190,7 +1216,7 @@ void opa_array_sort(opa_array_t *arr, opa_compare_fn cmp_fn)
     }
 }
 
-void __opa_object_buckets_free(opa_object_t *obj)
+void __opa_object_buckets_free(opa_object_t *obj, bool deep, bool bulk)
 {
     for (int i = 0; i < obj->n; i++)
     {
@@ -1200,7 +1226,11 @@ void __opa_object_buckets_free(opa_object_t *obj)
         {
             if (prev != NULL)
             {
-                opa_free(prev);
+                if (deep) {
+                    __opa_value_free(prev->k, deep, bulk);
+                    __opa_value_free(prev->v, deep, bulk);
+                }
+                __opa_free_maybe_bulk(prev, bulk);
             }
 
             prev = curr;
@@ -1208,17 +1238,21 @@ void __opa_object_buckets_free(opa_object_t *obj)
 
         if (prev != NULL)
         {
-            opa_free(prev);
+            if (deep) {
+                __opa_value_free(prev->k, deep, bulk);
+                __opa_value_free(prev->v, deep, bulk);
+            }
+            __opa_free_maybe_bulk(prev, bulk);
         }
     }
 
-    opa_free(obj->buckets);
+    __opa_free_maybe_bulk(obj->buckets, bulk);
 }
 
-void opa_object_free(opa_object_t *obj)
+void opa_object_free(opa_object_t *obj, bool deep, bool bulk)
 {
-    __opa_object_buckets_free(obj);
-    opa_free(obj);
+    __opa_object_buckets_free(obj, deep, bulk);
+    __opa_free_maybe_bulk(obj, bulk);
 }
 
 opa_array_t *opa_object_keys(opa_object_t *obj)
@@ -1276,7 +1310,8 @@ void __opa_object_grow(opa_object_t *obj, size_t n) {
 }
 
 OPA_INTERNAL
-void opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v)
+void __opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v,
+                         int free_dup_key)
 {
     size_t hash = opa_value_hash(k);
 
@@ -1284,6 +1319,8 @@ void opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v)
     {
         if (opa_value_compare(curr->k, k) == 0)
         {
+            if (free_dup_key)
+                opa_value_free(k);
             curr->v = v;
             return;
         }
@@ -1291,6 +1328,12 @@ void opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v)
 
     __opa_object_grow(obj, obj->len+1);
     __opa_object_insert_elem(obj, __opa_object_elem_alloc(k, v), hash);
+}
+
+OPA_INTERNAL
+void opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v)
+{
+    __opa_object_insert(obj, k, v, 0);
 }
 
 static void __opa_object_insert_elem(opa_object_t *obj, opa_object_elem_t *new, size_t hash)
@@ -1313,7 +1356,7 @@ static void __opa_object_insert_elem(opa_object_t *obj, opa_object_elem_t *new, 
     obj->len++;
 }
 
-void opa_object_remove(opa_object_t *obj, opa_value *k)
+void opa_object_remove(opa_object_t *obj, opa_value *k, bool bulk)
 {
     size_t hash = opa_value_hash(k);
 
@@ -1327,9 +1370,9 @@ void opa_object_remove(opa_object_t *obj, opa_value *k)
             *prev = curr->next;
             obj->len--;
 
-            opa_value_free(curr->k);
-            opa_value_free(curr->v);
-            opa_free(curr);
+            __opa_value_free(curr->k, true, bulk);
+            __opa_value_free(curr->v, true, bulk);
+            __opa_free_maybe_bulk(curr, bulk);
 
             // TODO: Consider shrinking the object size. For now it will remain
             // with its current size.
@@ -1357,7 +1400,7 @@ opa_object_elem_t *opa_object_get(opa_object_t *obj, opa_value *key)
     return NULL;
 }
 
-void __opa_set_buckets_free(opa_set_t *set)
+void __opa_set_buckets_free(opa_set_t *set, bool deep, bool bulk)
 {
     for (int i = 0; i < set->n; i++)
     {
@@ -1367,7 +1410,9 @@ void __opa_set_buckets_free(opa_set_t *set)
         {
             if (prev != NULL)
             {
-                opa_free(prev);
+                if (deep)
+                    __opa_value_free(prev->v, deep, bulk);
+                __opa_free_maybe_bulk(prev, bulk);
             }
 
             prev = curr;
@@ -1375,17 +1420,19 @@ void __opa_set_buckets_free(opa_set_t *set)
 
         if (prev != NULL)
         {
-            opa_free(prev);
+            if (deep)
+                __opa_value_free(prev->v, deep, bulk);
+            __opa_free_maybe_bulk(prev, bulk);
         }
     }
 
-    opa_free(set->buckets);
+    __opa_free_maybe_bulk(set->buckets, bulk);
 }
 
-void opa_set_free(opa_set_t *set)
+void opa_set_free(opa_set_t *set, bool deep, bool bulk)
 {
-    __opa_set_buckets_free(set);
-    opa_free(set);
+    __opa_set_buckets_free(set, deep, bulk);
+    __opa_free_maybe_bulk(set, bulk);
 }
 
 opa_array_t *__opa_set_values(opa_set_t *set)
@@ -1521,6 +1568,19 @@ int _validate_json_path(opa_value *path)
     return path_len;
 }
 
+OPA_INTERNAL
+opa_value *opa_string_copy(opa_string_t *src)
+{
+    char *s = (char *)opa_malloc(src->len);
+
+    for (int i = 0; i < src->len; i++)
+    {
+        s[i] = src->v[i];
+    }
+
+    return opa_string_allocated(s, src->len);
+}
+
 // For the given `data` value set the provided value `v` at
 // the specified `path`. Requires objects for containers,
 // any portion of the path that is missing will be created.
@@ -1554,7 +1614,12 @@ opa_errc opa_value_add_path(opa_value *data, opa_value *path, opa_value *v)
             {
                 case OPA_OBJECT:
                     next = opa_object();
+                    /* REMOVE (left in for readability)
                     opa_object_insert(opa_cast_object(curr), k, next);
+                    */
+                    __opa_object_insert(opa_cast_object(curr),
+                                        opa_string_copy(opa_cast_string(k)),
+                                        next, 1);
                     break;
                 default:
                     return OPA_ERR_INVALID_TYPE;
@@ -1571,7 +1636,11 @@ opa_errc opa_value_add_path(opa_value *data, opa_value *path, opa_value *v)
     switch (curr->type)
     {
         case OPA_OBJECT:
+            /* REMOVE (left in for readability)
             opa_object_insert(opa_cast_object(curr), k, v);
+            */
+            __opa_object_insert(opa_cast_object(curr),
+                                opa_string_copy(opa_cast_string(k)), v, 1);
             break;
         default:
             return OPA_ERR_INVALID_TYPE;
@@ -1579,7 +1648,7 @@ opa_errc opa_value_add_path(opa_value *data, opa_value *path, opa_value *v)
 
     if (old != NULL)
     {
-        opa_value_free(old);
+        __opa_value_free(old, true, true);
     }
 
     return OPA_ERR_OK;
@@ -1620,7 +1689,7 @@ opa_errc opa_value_remove_path(opa_value *data, opa_value *path)
        curr = next;
     }
 
-    opa_object_remove(opa_cast_object(curr), opa_value_get_array_native(p, path_len-1));
+    opa_object_remove(opa_cast_object(curr), opa_value_get_array_native(p, path_len-1), true);
 
     return OPA_ERR_OK;
 }

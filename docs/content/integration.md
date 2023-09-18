@@ -167,6 +167,21 @@ Content-Type: application/json
 For another example of how to integrate with OPA via HTTP see the [HTTP
 API Authorization](../http-api-authorization) tutorial.
 
+#### Ecosystem Projects
+
+The REST API is a common way to build integrations with OPA in distributed systems.
+{{<
+  ecosystem_feature_link
+  key="rest-api-integration"
+  singular_intro="There is currently 1 project"
+  singular_link="listed in the OPA Ecosystem"
+  singular_outro="which is building on the OPA REST API."
+  plural_intro="The"
+  plural_link="COUNT projects listed in the OPA Ecosystem"
+  plural_outro="building on the OPA REST API might be good inspiration for your own integration - many are open source."
+>}}
+The [reference documentation](../rest-api) is also a good place to start.
+
 ### Integrating with the Go SDK
 
 The [SDK](https://pkg.go.dev/github.com/open-policy-agent/opa/sdk) package contains high-level APIs for embedding OPA
@@ -236,6 +251,7 @@ func main() {
 
 	// create an instance of the OPA object
 	opa, err := sdk.New(ctx, sdk.Options{
+		ID:     "opa-test-1",
 		Config: bytes.NewReader(config),
 	})
 	if err != nil {
@@ -255,6 +271,10 @@ func main() {
 
 If you executed this code, the output (i.e. [Decision Log](https://www.openpolicyagent.org/docs/latest/management-decision-logs/) event)
 would be logged to the console by default.
+
+Setting an `ID` in `sdk.Options` is optional, but recommended. If you do not set an `ID`, a random one will be created
+for the system. While this is fine for testing, it makes it difficult to monitor the system over time, as a new ID will
+be created each time the SDK is initialized, such as when the process is restarted.
 
 ### Integrating with the Go API
 
@@ -373,11 +393,36 @@ For more examples of embedding OPA as a library see the
 [`rego`](https://pkg.go.dev/github.com/open-policy-agent/opa/rego#pkg-examples)
 package in the Go documentation.
 
+#### Ecosystem Projects
+
+The Go API is made available to allow other projects to build policy functionality into their
+applications. 
+{{<
+  ecosystem_feature_link
+  key="go-integration"
+  singular_intro="Currently 1 project"
+  singular_link="listed in the OPA Ecosystem"
+  singular_outro="is using the OPA Go API in this way."
+  plural_intro="View the"
+  plural_link="COUNT projects"
+  plural_outro="listed in the OPA Ecosystem already using the API in Go applications - many of which are open source and may serve as a good reference."
+>}}
+
 ### WebAssembly (Wasm)
 
-Policies can be evaluated as compiled Wasm binaries.
+Policies can be evaluated as compiled Wasm binaries. See [OPA Wasm docs](../wasm) for more details.
 
-See [OPA Wasm docs](../wasm) for more details.
+There are a number of projects already built on OPA Wasm, 
+{{<
+  ecosystem_feature_link
+  key="wasm-integration"
+  singular_intro="including 1 project"
+  singular_link="listed in the OPA Ecosystem page."
+  singular_outro="."
+  plural_intro=" including "
+  plural_link="COUNT projects"
+  plural_outro="listed in the OPA Ecosystem page."
+>}}
 
 ### Intermediate Representation (IR)
 

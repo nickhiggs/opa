@@ -123,6 +123,7 @@ opa_value *opa_value_get(opa_value *node, opa_value *key);
 opa_value *opa_value_iter(opa_value *node, opa_value *prev);
 size_t opa_value_length(opa_value *node);
 void opa_value_free(opa_value *node);
+void opa_value_free_shallow(opa_value *node);
 opa_value *opa_value_merge(opa_value *a, opa_value *b);
 opa_value *opa_value_shallow_copy(opa_value *node);
 opa_value *opa_value_transitive_closure(opa_value *node);
@@ -151,21 +152,21 @@ void opa_value_number_set_int(opa_value *v, long long i);
 
 int opa_number_try_int(opa_number_t *n, long long *i);
 double opa_number_as_float(opa_number_t *n);
-void opa_number_free(opa_number_t *n);
+void opa_number_free(opa_number_t *n, bool bulk);
 
-void opa_string_free(opa_string_t *s);
+void opa_string_free(opa_string_t *s, bool bulk);
 
-void opa_array_free(opa_array_t *arr);
+void opa_array_free(opa_array_t *arr, bool deep, bool bulk);
 void opa_array_append(opa_array_t *arr, opa_value *v);
 void opa_array_sort(opa_array_t *arr, opa_compare_fn cmp_fn);
 
-void opa_object_free(opa_object_t *obj);
+void opa_object_free(opa_object_t *obj, bool deep, bool bulk);
 opa_array_t *opa_object_keys(opa_object_t *obj);
 void opa_object_insert(opa_object_t *obj, opa_value *k, opa_value *v);
-void opa_object_remove(opa_object_t *obj, opa_value *k);
+void opa_object_remove(opa_object_t *obj, opa_value *k, bool bulk);
 opa_object_elem_t *opa_object_get(opa_object_t *obj, opa_value *key);
 
-void opa_set_free(opa_set_t *set);
+void opa_set_free(opa_set_t *set, bool deep, bool bulk);
 void opa_set_add(opa_set_t *set, opa_value *v);
 opa_set_elem_t *opa_set_get(opa_set_t *set, opa_value *v);
 

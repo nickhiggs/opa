@@ -112,7 +112,8 @@ The -O flag controls the optimization level. By default, optimization is disable
 When optimization is enabled the 'build' command generates a bundle that is semantically
 equivalent to the input files however the structure of the files in the bundle may have
 been changed by rewriting, inlining, pruning, etc. Higher optimization levels may result
-in longer build times.
+in longer build times. The --partial-namespace flag can used in conjunction with the -O flag
+to specify the namespace for the partially evaluated files in the optimized bundle.
 
 The 'build' command supports targets (specified by -t):
 
@@ -240,6 +241,7 @@ opa build <path> [<path> [...]] [flags]
       --ignore strings                 set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
   -O, --optimize int                   set optimization level
   -o, --output string                  set the output filename (default "bundle.tar.gz")
+      --partial-namespace string       set the namespace to use for partially evaluated files in an optimized bundle (default "partial")
       --prune-unused                   exclude dependents of entrypoints
   -r, --revision string                set output bundle revision
       --scope string                   scope to use for bundle signature verification
@@ -481,6 +483,7 @@ Set the output format with the --format flag.
     --format=pretty    : output query results in a human-readable format
     --format=source    : output partial evaluation results in a source format
     --format=raw       : output the values from query results in a scripting friendly format
+    --format=discard   : output the result field as "discarded" when non-nil
 
 ### Schema
 
@@ -521,42 +524,42 @@ opa eval <query> [flags]
 ### Options
 
 ```
-  -b, --bundle string                                     set bundle file(s) or directory path(s). This flag can be repeated.
-      --capabilities string                               set capabilities version or capabilities.json file path
-      --count int                                         number of times to repeat each benchmark (default 1)
-      --coverage                                          report coverage
-  -d, --data string                                       set policy or data file(s). This flag can be repeated.
-      --disable-early-exit                                disable 'early exit' optimizations
-      --disable-indexing                                  disable indexing optimizations
-      --disable-inlining stringArray                      set paths of documents to exclude from inlining
-  -e, --entrypoint string                                 set slash separated entrypoint path
-      --explain {off,full,notes,fails,debug}              enable query explanations (default off)
-      --fail                                              exits with non-zero exit code on undefined/empty result and errors
-      --fail-defined                                      exits with non-zero exit code on defined/non-empty result and errors
-  -f, --format {json,values,bindings,pretty,source,raw}   set output format (default json)
-  -h, --help                                              help for eval
-      --ignore strings                                    set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
-      --import string                                     set query import(s). This flag can be repeated.
-  -i, --input string                                      set input file path
-      --instrument                                        enable query instrumentation metrics (implies --metrics)
-      --metrics                                           report query performance metrics
-  -O, --optimize int                                      set optimization level
-      --package string                                    set query package
-  -p, --partial                                           perform partial evaluation
-      --pretty-limit int                                  set limit after which pretty output gets truncated (default 80)
-      --profile                                           perform expression profiling
-      --profile-limit int                                 set number of profiling results to show (default 10)
-      --profile-sort string                               set sort order of expression profiler results
-  -s, --schema string                                     set schema file path or directory path
-      --shallow-inlining                                  disable inlining of rules that depend on unknowns
-      --show-builtin-errors                               collect and return all encountered built-in errors, built in errors are not fatal
-      --stdin                                             read query from stdin
-  -I, --stdin-input                                       read input document from stdin
-  -S, --strict                                            enable compiler strict mode
-      --strict-builtin-errors                             treat the first built-in function error encountered as fatal
-  -t, --target {rego,wasm}                                set the runtime to exercise (default rego)
-      --timeout duration                                  set eval timeout (default unlimited)
-  -u, --unknowns stringArray                              set paths to treat as unknown during partial evaluation (default [input])
+  -b, --bundle string                                             set bundle file(s) or directory path(s). This flag can be repeated.
+      --capabilities string                                       set capabilities version or capabilities.json file path
+      --count int                                                 number of times to repeat each benchmark (default 1)
+      --coverage                                                  report coverage
+  -d, --data string                                               set policy or data file(s). This flag can be repeated.
+      --disable-early-exit                                        disable 'early exit' optimizations
+      --disable-indexing                                          disable indexing optimizations
+      --disable-inlining stringArray                              set paths of documents to exclude from inlining
+  -e, --entrypoint string                                         set slash separated entrypoint path
+      --explain {off,full,notes,fails,debug}                      enable query explanations (default off)
+      --fail                                                      exits with non-zero exit code on undefined/empty result and errors
+      --fail-defined                                              exits with non-zero exit code on defined/non-empty result and errors
+  -f, --format {json,values,bindings,pretty,source,raw,discard}   set output format (default json)
+  -h, --help                                                      help for eval
+      --ignore strings                                            set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
+      --import string                                             set query import(s). This flag can be repeated.
+  -i, --input string                                              set input file path
+      --instrument                                                enable query instrumentation metrics (implies --metrics)
+      --metrics                                                   report query performance metrics
+  -O, --optimize int                                              set optimization level
+      --package string                                            set query package
+  -p, --partial                                                   perform partial evaluation
+      --pretty-limit int                                          set limit after which pretty output gets truncated (default 80)
+      --profile                                                   perform expression profiling
+      --profile-limit int                                         set number of profiling results to show (default 10)
+      --profile-sort string                                       set sort order of expression profiler results. Accepts: total_time_ns, num_eval, num_redo, num_gen_expr, file, line. This flag can be repeated.
+  -s, --schema string                                             set schema file path or directory path
+      --shallow-inlining                                          disable inlining of rules that depend on unknowns
+      --show-builtin-errors                                       collect and return all encountered built-in errors, built in errors are not fatal
+      --stdin                                                     read query from stdin
+  -I, --stdin-input                                               read input document from stdin
+  -S, --strict                                                    enable compiler strict mode
+      --strict-builtin-errors                                     treat the first built-in function error encountered as fatal
+  -t, --target {rego,wasm}                                        set the runtime to exercise (default rego)
+      --timeout duration                                          set eval timeout (default unlimited)
+  -u, --unknowns stringArray                                      set paths to treat as unknown during partial evaluation (default [input])
 ```
 
 ____
@@ -596,8 +599,9 @@ opa exec <path> [<path> [...]] [flags]
   -b, --bundle string                        set bundle file(s) or directory path(s). This flag can be repeated.
   -c, --config-file string                   set path of configuration file
       --decision string                      set decision to evaluate
-      --fail                                 exits with non-zero exit code on undefined/empty result and errors
-      --fail-defined                         exits with non-zero exit code on defined/non-empty result and errors
+      --fail                                 exits with non-zero exit code on undefined result and errors
+      --fail-defined                         exits with non-zero exit code on defined result and errors
+      --fail-non-empty                       exits with non-zero exit code on non-empty result and errors
   -f, --format {pretty,json}                 set output format (default pretty)
   -h, --help                                 help for exec
       --log-format {text,json,json-pretty}   set log format (default json)
@@ -824,6 +828,10 @@ for existing bundle files or directories following the bundle structure.
 
 To skip bundle verification, use the --skip-verify flag.
 
+The --watch flag can be used to monitor policy and data file-system changes. When a change is detected, the updated policy
+and data is reloaded into OPA. Watching individual files (rather than directories) is generally not recommended as some
+updates might cause them to be dropped by OPA.
+
 
 ```
 opa run [flags]
@@ -864,6 +872,7 @@ opa run [flags]
       --tls-cert-file string                 set path of TLS certificate file
       --tls-cert-refresh-period duration     set certificate refresh period
       --tls-private-key-file string          set path of TLS private key file
+      --unix-socket-perm string              specify the permissions for the Unix domain socket if used to listen for incoming connections (default "755")
       --verification-key string              set the secret (HMAC) or path of the PEM file containing the public key (RSA and ECDSA)
       --verification-key-id string           name assigned to the verification key used for bundle verification (default "default")
   -w, --watch                                watch command line files for changes
@@ -985,7 +994,7 @@ Execute Rego test cases
 ### Synopsis
 
 Execute Rego test cases.
-
+	
 The 'test' command takes a file or directory path as input and executes all
 test cases discovered in matching files. Test cases are rules whose names have the prefix "test_".
 
@@ -1051,6 +1060,10 @@ Example benchmark run:
 
 The optional "gobench" output format conforms to the Go Benchmark Data Format.
 
+The --watch flag can be used to monitor policy and data file-system changes. When a change is detected, OPA reloads
+the policy and data and then re-runs the tests. Watching individual files (rather than directories) is generally not
+recommended as some updates might cause them to be dropped by OPA.
+
 
 ```
 opa test <path> [path [...]] [flags]
@@ -1072,10 +1085,12 @@ opa test <path> [path [...]] [flags]
       --ignore strings                     set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
   -m, --max-errors int                     set the number of errors to allow before compilation fails early (default 10)
   -r, --run string                         run only test cases matching the regular expression.
+  -s, --schema string                      set schema file path or directory path
   -t, --target {rego,wasm}                 set the runtime to exercise (default rego)
       --threshold float                    set coverage threshold and exit with non-zero status if coverage is less than threshold %
       --timeout duration                   set test timeout (default 5s, 30s when benchmarking)
   -v, --verbose                            set verbose reporting mode
+  -w, --watch                              watch command line files for changes
 ```
 
 ____

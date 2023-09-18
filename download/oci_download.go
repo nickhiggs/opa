@@ -1,9 +1,9 @@
+//go:build !opa_no_oci
+
 package download
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/containerd/containerd/errdefs"
@@ -21,7 +20,6 @@ import (
 	"github.com/containerd/containerd/remotes/docker"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"oras.land/oras-go/v2"
 	oraslib "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 
@@ -33,26 +31,7 @@ import (
 	"github.com/open-policy-agent/opa/util"
 )
 
-type OCIDownloader struct {
-	config         Config                        // downloader configuration for tuning polling and other downloader behaviour
-	client         rest.Client                   // HTTP client to use for bundle downloading
-	path           string                        // path for OCI image as <registry>/<org>/<repo>:<tag>
-	localStorePath string                        // path for the local OCI storage
-	trigger        chan chan struct{}            // channel to signal downloads when manual triggering is enabled
-	stop           chan chan struct{}            // used to signal plugin to stop running
-	f              func(context.Context, Update) // callback function invoked when download updates occur
-	sizeLimitBytes *int64                        // max bundle file size in bytes (passed to reader)
-	bvc            *bundle.VerificationConfig
-	wg             sync.WaitGroup
-	logger         logging.Logger
-	mtx            sync.Mutex
-	stopped        bool
-	persist        bool
-	store          *oci.Store
-	etag           string
-}
-
-// New returns a new Downloader that can be started.
+// NewOCI returns a new Downloader that can be started.
 func NewOCI(config Config, client rest.Client, path, storePath string) *OCIDownloader {
 	localstore, err := oci.New(storePath)
 	if err != nil {
@@ -101,7 +80,7 @@ func (d *OCIDownloader) WithBundlePersistence(persist bool) *OCIDownloader {
 	return d
 }
 
-// TODO: remove method ClearCache is deprecated. Use SetCache instead.
+// ClearCache is deprecated. Use SetCache instead.
 func (d *OCIDownloader) ClearCache() {
 }
 
@@ -274,7 +253,7 @@ func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downl
 		return nil, err
 	}
 	loader := bundle.NewTarballLoaderWithBaseURL(fileReader, d.localStorePath)
-	reader := bundle.NewCustomReader(loader).WithBaseDir(d.localStorePath).
+	reader := bundle.NewCustomReader(loader).
 		WithMetrics(m).
 		WithBundleVerificationConfig(d.bvc).
 		WithBundleEtag(etag)
@@ -294,19 +273,26 @@ func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downl
 }
 
 func (d *OCIDownloader) pull(ctx context.Context, ref string) (*ocispec.Descriptor, error) {
-	authHeader := make(http.Header)
-	client, err := d.getHTTPClient(&authHeader)
+	lookup := d.client.AuthPluginLookup()
+
+	plugin, err := d.client.Config().AuthPlugin(lookup)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to look up auth plugin: %w", err)
 	}
-	urlInfo, err := url.Parse(d.client.Config().URL)
+
+	d.logger.Debug("OCIDownloader: using auth plugin: %T", plugin)
+
+	resolver, err := dockerResolver(plugin, d.client.Config(), d.logger)
 	if err != nil {
 		return nil, fmt.Errorf("invalid host url %s: %w", d.client.Config().URL, err)
 	}
 
-	target := newRemoteManager(d.getResolverHost(client, urlInfo), authHeader, ref)
+	target := remoteManager{
+		resolver: resolver,
+		srcRef:   ref,
+	}
 
-	manifestDescriptor, err := oraslib.Copy(ctx, target, ref, d.store, "", oraslib.DefaultCopyOptions)
+	manifestDescriptor, err := oraslib.Copy(ctx, &target, ref, d.store, "", oraslib.DefaultCopyOptions)
 	if err != nil {
 		return nil, fmt.Errorf("download for '%s' failed: %w", ref, err)
 	}
@@ -314,24 +300,21 @@ func (d *OCIDownloader) pull(ctx context.Context, ref string) (*ocispec.Descript
 	return &manifestDescriptor, nil
 }
 
-func (d *OCIDownloader) getResolverHost(client *http.Client, urlInfo *url.URL) docker.RegistryHosts {
-	creds := d.client.Config().Credentials
-	var auth docker.Authorizer
-	if creds.Bearer == nil {
-		auth = docker.NewDockerAuthorizer(
-			docker.WithAuthClient(client),
-		)
-	} else {
-		auth = docker.NewDockerAuthorizer(
-			docker.WithAuthClient(client),
-			docker.WithAuthCreds(func(string) (string, string, error) {
-				creds := d.client.Config().Credentials
-				if creds.Bearer == nil {
-					return " ", " ", nil
-				}
+func dockerResolver(plugin rest.HTTPAuthPlugin, config *rest.Config, logger logging.Logger) (remotes.Resolver, error) {
+	client, err := plugin.NewClient(*config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create auth client: %w", err)
+	}
 
-				return creds.Bearer.Scheme, creds.Bearer.Token, nil
-			}))
+	urlInfo, err := url.Parse(config.URL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse url: %w", err)
+	}
+
+	authorizer := pluginAuthorizer{
+		plugin: plugin,
+		client: client,
+		logger: logger,
 	}
 
 	registryHost := docker.RegistryHost{
@@ -340,43 +323,70 @@ func (d *OCIDownloader) getResolverHost(client *http.Client, urlInfo *url.URL) d
 		Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve | docker.HostCapabilityPush,
 		Client:       client,
 		Path:         "/v2",
-		Authorizer:   auth,
+		Authorizer:   &authorizer,
 	}
 
-	return func(string) ([]docker.RegistryHost, error) {
-		return []docker.RegistryHost{registryHost}, nil
+	opts := docker.ResolverOptions{
+		Hosts: func(string) ([]docker.RegistryHost, error) {
+			return []docker.RegistryHost{registryHost}, nil
+		},
 	}
+
+	return docker.NewResolver(opts), nil
 }
 
-func (d *OCIDownloader) getHTTPClient(authHeader *http.Header) (*http.Client, error) {
-	var client *http.Client
-	var err error
-	clientConfig := d.client.Config()
-	if clientConfig != nil && clientConfig.Credentials.ClientTLS != nil {
-		client, err = clientConfig.Credentials.ClientTLS.NewClient(*clientConfig)
-		if err != nil {
-			return nil, fmt.Errorf("can not create a new client: %w", err)
-		}
-	} else {
-		if clientConfig != nil && clientConfig.Credentials.Bearer != nil {
-			client, err = clientConfig.Credentials.Bearer.NewClient(*clientConfig)
-			if err != nil {
-				return nil, fmt.Errorf("can not create a new bearer client: %w", err)
-			}
+type pluginAuthorizer struct {
+	plugin rest.HTTPAuthPlugin
+	client *http.Client
 
-			authHeader.Add("Authorization",
-				fmt.Sprintf("%s %s",
-					clientConfig.Credentials.Bearer.Scheme,
-					base64.StdEncoding.EncodeToString([]byte(clientConfig.Credentials.Bearer.Token))),
-			)
-		} else {
-			client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: clientConfig.AllowInsecureTLS}}}
-		}
-	}
-	return client, nil
+	// authorizer will be populated by the first call to pluginAuthorizer.Prepare
+	// since it requires a first pass through the plugin.Prepare method.
+	authorizer docker.Authorizer
+
+	logger logging.Logger
 }
 
-func manifestFromDesc(ctx context.Context, target oras.Target, desc *ocispec.Descriptor) (*ocispec.Manifest, error) {
+var _ docker.Authorizer = &pluginAuthorizer{}
+
+func (a *pluginAuthorizer) AddResponses(ctx context.Context, responses []*http.Response) error {
+	return a.authorizer.AddResponses(ctx, responses)
+}
+
+// Authorize uses a rest.HTTPAuthPlugin to Prepare a request before passing it on
+// to the docker.Authorizer.
+func (a *pluginAuthorizer) Authorize(ctx context.Context, req *http.Request) error {
+	if err := a.plugin.Prepare(req); err != nil {
+		err = fmt.Errorf("failed to prepare docker request: %w", err)
+
+		// Make sure to log this before passing the error back to docker
+		a.logger.Error(err.Error())
+
+		return err
+	}
+
+	if a.authorizer == nil {
+		// Some registry authentication implementations require a token fetch from
+		// a separate authenticated token server. This flow is described in the
+		// docker token auth spec:
+		// https://docs.docker.com/registry/spec/auth/token/#requesting-a-token
+		//
+		// Unfortunately, the containerd implementation does not use the Prepare
+		// mechanism to authenticate these token requests and we need to add
+		// auth information in form of a static docker.WithAuthHeader.
+		//
+		// Since rest.HTTPAuthPlugins will set the auth header on the request
+		// passed to HTTPAuthPlugin.Prepare, we can use it afterwards to build
+		// our docker.Authorizer.
+		a.authorizer = docker.NewDockerAuthorizer(
+			docker.WithAuthHeader(req.Header),
+			docker.WithAuthClient(a.client),
+		)
+	}
+
+	return a.authorizer.Authorize(ctx, req)
+}
+
+func manifestFromDesc(ctx context.Context, target oraslib.Target, desc *ocispec.Descriptor) (*ocispec.Manifest, error) {
 	var manifest ocispec.Manifest
 
 	descReader, err := target.Fetch(ctx, *desc)
@@ -404,15 +414,6 @@ func manifestFromDesc(ctx context.Context, target oras.Target, desc *ocispec.Des
 type remoteManager struct {
 	resolver remotes.Resolver
 	srcRef   string
-}
-
-func newRemoteManager(hosts docker.RegistryHosts, headers http.Header, srcRef string) *remoteManager {
-	resolver := docker.NewResolver(docker.ResolverOptions{
-		Hosts:   hosts,
-		Headers: headers,
-	})
-
-	return &remoteManager{resolver: resolver, srcRef: srcRef}
 }
 
 func (r *remoteManager) Resolve(ctx context.Context, ref string) (ocispec.Descriptor, error) {

@@ -271,9 +271,10 @@ configuration labels or environment variables.
 
 In practice, discovery services do not change frequently. These configuration sections are treated as
 immutable to avoid accidental configuration errors rendering OPA unable to discover a new configuration.
-If the discovered configuration changes the `discovery` or `labels` sections,
+If the discovered configuration changes the `discovery` section,
 those changes are ignored. If the discovered configuration changes the discovery service,
 an error will be logged.
+If the discovered configuration changes the `labels` section, only labels that are additional compared to the bootstrap configuration are used, all other changes are ignored. If the discovery document changes its `labels` section over time, the effective set of labels is always the bootstrap configuration plus added labels from the latest discovery document. 
 
 ### Discovery Bundle Signature
 
@@ -299,5 +300,16 @@ the discovery bundle itself is persisted. The discovered configuration that is g
 policies contained in the discovery bundle will **NOT** be persisted.
 
 {{< info >}}
-By default, the discovery bundle is persisted under the current working directory of the OPA process (e.g., `./.opa/bundles/<discovery.name>/bundle.tar.gz`).
+The discovery bundle is persisted at
+`<persistence_directory>/bundles/<discovery.name>/bundle.tar.gz`. By default
+`persistence_directory` is `.opa` in the working directory of the OPA process.
+If `persistence_directory` is changed through discovery this will not affect
+where the discovery plugin will store the discovery bundles, the boot
+configuration will always be used.
 {{< /info >}}
+
+## Ecosystem Projects
+
+Configuring OPA using Discovery Bundles is a powerful production feature.
+
+{{< ecosystem_feature_embed key="opa-bundles-discovery" topic="or support distributing discovery bundles" >}}

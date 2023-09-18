@@ -467,6 +467,7 @@ func toRef(s string) Ref {
 }
 
 func TestCompilerCheckRuleHeadRefs(t *testing.T) {
+	t.Setenv("EXPERIMENTAL_GENERAL_RULE_REFS", "true")
 
 	tests := []struct {
 		note     string
@@ -480,7 +481,6 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 				`package x
 				p.q[i].r = 1 { i := 10 }`,
 			),
-			err: "rego_type_error: rule head must only contain string terms (except for last): i",
 		},
 		{
 			note: "valid: ref is single-value rule with var key",
@@ -559,7 +559,6 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 				`package x
 				p.q[arr[0]].r { i := 10 }`,
 			),
-			err: "rego_type_error: rule head must only contain string terms (except for last): arr[0]",
 		},
 		{
 			note: "invalid: non-string in ref (not last position)",
@@ -567,7 +566,6 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 				`package x
 				p.q[10].r { true }`,
 			),
-			err: "rego_type_error: rule head must only contain string terms (except for last): 10",
 		},
 		{
 			note: "valid: multi-value with var key",
@@ -583,6 +581,64 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 				p.q.r[y.z] if y := {"z": "a"}`,
 			),
 			expected: MustParseRule(`p.q.r[__local0__]  { y := {"z": "a"}; __local0__ = y.z }`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			mods := make(map[string]*Module, len(tc.modules))
+			for i, m := range tc.modules {
+				mods[fmt.Sprint(i)] = m
+			}
+			c := NewCompiler()
+			c.Modules = mods
+			compileStages(c, c.rewriteRuleHeadRefs)
+			if tc.err != "" {
+				assertCompilerErrorStrings(t, c, []string{tc.err})
+			} else {
+				if len(c.Errors) > 0 {
+					t.Fatalf("expected no errors, got %v", c.Errors)
+				}
+				if tc.expected != nil {
+					assertRulesEqual(t, tc.expected, mods["0"].Rules[0])
+				}
+			}
+		})
+	}
+}
+
+// TODO: Remove when general rule refs are enabled by default.
+func TestCompilerCheckRuleHeadRefsWithGeneralRuleRefsDisabled(t *testing.T) {
+
+	tests := []struct {
+		note     string
+		modules  []*Module
+		expected *Rule
+		err      string
+	}{
+		{
+			note: "ref contains var",
+			modules: modules(
+				`package x
+				p.q[i].r = 1 { i := 10 }`,
+			),
+			err: "rego_type_error: rule head must only contain string terms (except for last): i",
+		},
+		{
+			note: "invalid: ref in ref",
+			modules: modules(
+				`package x
+				p.q[arr[0]].r { i := 10 }`,
+			),
+			err: "rego_type_error: rule head must only contain string terms (except for last): arr[0]",
+		},
+		{
+			note: "invalid: non-string in ref (not last position)",
+			modules: modules(
+				`package x
+				p.q[10].r { true }`,
+			),
+			err: "rego_type_error: rule head must only contain string terms (except for last): 10",
 		},
 	}
 
@@ -1813,6 +1869,9 @@ p { true }`,
 import future.keywords
 
 bar.baz contains "quz" if true`,
+		"mod8.rego": `package badrules.complete_partial
+p := 1
+p[r] := 2 { r := "foo" }`,
 	})
 
 	c.WithPathConflictsCheck(func(path []string) (bool, error) {
@@ -1833,6 +1892,7 @@ bar.baz contains "quz" if true`,
 		"rego_type_error: conflicting rules data.badrules.arity.g found",
 		"rego_type_error: conflicting rules data.badrules.arity.p.q.h found",
 		"rego_type_error: conflicting rules data.badrules.arity.p.q.i found",
+		"rego_type_error: conflicting rules data.badrules.complete_partial.p[r] found",
 		"rego_type_error: conflicting rules data.badrules.p[x] found",
 		"rego_type_error: conflicting rules data.badrules.q found",
 		"rego_type_error: multiple default rules data.badrules.defkw.foo found",
@@ -1844,7 +1904,43 @@ bar.baz contains "quz" if true`,
 	assertCompilerErrorStrings(t, c, expected)
 }
 
+func TestCompilerCheckRuleConflictsDefaultFunction(t *testing.T) {
+	tests := []struct {
+		note    string
+		modules []*Module
+		err     string
+	}{
+		{
+			note: "conflicting rules",
+			modules: modules(
+				`package pkg
+				default f(_) = 100
+				f(x, y) = x {
+                   x == y
+				}`),
+			err: "rego_type_error: conflicting rules data.pkg.f found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			mods := make(map[string]*Module, len(tc.modules))
+			for i, m := range tc.modules {
+				mods[fmt.Sprint(i)] = m
+			}
+			c := NewCompiler()
+			c.Modules = mods
+			compileStages(c, c.checkRuleConflicts)
+			if tc.err != "" {
+				assertCompilerErrorStrings(t, c, []string{tc.err})
+			} else {
+				assertCompilerErrorStrings(t, c, []string{})
+			}
+		})
+	}
+}
+
 func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
+	t.Setenv("EXPERIMENTAL_GENERAL_RULE_REFS", "true")
 
 	tests := []struct {
 		note    string
@@ -1931,7 +2027,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 				p.q.r { true }`,
 				`package pkg
 				p.q.r.s { true }`),
-			err: "rego_type_error: single-value rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s]",
+			err: "rego_type_error: rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s]",
 		},
 		{
 			note: "single-value with other rule overlap",
@@ -1940,7 +2036,15 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 				p.q.r { true }
 				p.q.r.s { true }
 				p.q.r.t { true }`),
-			err: "rego_type_error: single-value rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s data.pkg.p.q.r.t]",
+			err: "rego_type_error: rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s data.pkg.p.q.r.t]",
+		},
+		{
+			note: "single-value with other partial object (same ref) overlap",
+			modules: modules(
+				`package pkg
+				p.q := 1
+				p.q[r] := 2 { r := "foo" }`),
+			err: "rego_type_error: conflicting rules data.pkg.p.q[r] foun",
 		},
 		{
 			note: "single-value with other rule overlap, unknown key",
@@ -1949,7 +2053,48 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 				p.q[r] = x { r = input.key; x = input.foo }
 				p.q.r.s = x { true }
 				`),
-			err: "rego_type_error: single-value rule data.pkg.p.q[r] conflicts with [data.pkg.p.q.r.s]",
+		},
+		{
+			note: "single-value with other rule overlap, unknown ref var and key",
+			modules: modules(
+				`package pkg
+				p.q[r][s] = x { r = input.key1; s = input.key2; x = input.foo }
+				p.q.r.s.t = x { true }
+				`),
+		},
+		{
+			note: "single-value partial object with other partial object rule overlap, unknown keys (regression test for #5855; invalidated by multi-var refs)",
+			modules: modules(
+				`package pkg
+				p[r] := x { r = input.key; x = input.bar }
+				p.q[r] := x { r = input.key; x = input.bar }
+				`),
+		},
+		{
+			note: "single-value partial object with other partial object (implicit 'true' value) rule overlap, unknown keys",
+			modules: modules(
+				`package pkg
+				p[r] := x { r = input.key; x = input.bar }
+				p.q[r] { r = input.key }
+				`),
+		},
+		{
+			note: "single-value partial object with multi-value rule (ref head) overlap, unknown key",
+			modules: modules(
+				`package pkg
+				import future.keywords
+				p[r] := x { r = input.key; x = input.bar }
+				p.q contains r { r = input.key }
+				`),
+		},
+		{
+			note: "single-value partial object with multi-value rule overlap, unknown key",
+			modules: modules(
+				`package pkg
+				p[r] := x { r = input.key; x = input.bar }
+				p.q { true }
+				`),
+			err: "rego_type_error: conflicting rules data.pkg.p found",
 		},
 		{
 			note: "single-value rule with known and unknown key",
@@ -1958,6 +2103,134 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 				p.q[r] = x { r = input.key; x = input.foo }
 				p.q.s = "x" { true }
 				`),
+		},
+		{
+			note: "multi-value rule with other rule overlap",
+			modules: modules(
+				`package pkg
+				p[v] { v := ["a", "b"][_] }
+				p.q := 42
+				`),
+			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q]",
+		},
+		{
+			note: "multi-value rule with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				p[v] { v := ["a", "b"][_] }
+				p.q.r { true }
+				`),
+			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
+		},
+		{
+			note: "multi-value rule (dots in head) with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				import future.keywords
+				p.q contains v { v := ["a", "b"][_] }
+				p.q.r { true }
+				`),
+			err: "rule data.pkg.p.q conflicts with [data.pkg.p.q.r]",
+		},
+		{
+			note: "multi-value rule (dots and var in head) with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				import future.keywords
+				p[q] contains v { v := ["a", "b"][_] }
+				p.q.r { true }
+				`),
+		},
+		{
+			note: "function with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				p(x) := x
+				p.q.r { true }
+				`),
+			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
+		},
+		{
+			note: "function with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				p(x) := x
+				p.q.r { true }
+				`),
+			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
+		},
+		{
+			note: "function (ref) with other rule (ref) overlap",
+			modules: modules(
+				`package pkg
+				p.q(x) := x
+				p.q.r { true }
+				`),
+			err: "rego_type_error: rule data.pkg.p.q conflicts with [data.pkg.p.q.r]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			mods := make(map[string]*Module, len(tc.modules))
+			for i, m := range tc.modules {
+				mods[fmt.Sprint(i)] = m
+			}
+			c := NewCompiler()
+			c.Modules = mods
+			compileStages(c, c.checkRuleConflicts)
+			if tc.err != "" {
+				assertCompilerErrorStrings(t, c, []string{tc.err})
+			} else {
+				assertCompilerErrorStrings(t, c, []string{})
+			}
+		})
+	}
+}
+
+// TODO: Remove when general rule refs are enabled by default.
+func TestGeneralRuleRefsDisabled(t *testing.T) {
+	// EXPERIMENTAL_GENERAL_RULE_REFS env var not set
+
+	tests := []struct {
+		note    string
+		modules []*Module
+		err     string
+	}{
+		{
+			note: "single-value with other rule overlap, unknown key",
+			modules: modules(
+				`package pkg
+				p.q[r] = x { r = input.key; x = input.foo }
+				p.q.r.s = x { true }
+				`),
+			err: "rego_type_error: rule data.pkg.p.q[r] conflicts with [data.pkg.p.q.r.s]",
+		},
+		{
+			note: "single-value with other rule overlap, unknown ref var and key",
+			modules: modules(
+				`package pkg
+				p.q[r][s] = x { r = input.key1; s = input.key2; x = input.foo }
+				p.q.r.s.t = x { true }
+				`),
+			err: "rego_type_error: rule head must only contain string terms (except for last): r",
+		},
+		{
+			note: "single-value partial object with other partial object rule overlap, unknown keys (regression test for #5855; invalidated by multi-var refs)",
+			modules: modules(
+				`package pkg
+				p[r] := x { r = input.key; x = input.bar }
+				p.q[r] := x { r = input.key; x = input.bar }
+				`),
+			err: "rego_type_error: rule data.pkg.p[r] conflicts with [data.pkg.p.q[r]]",
+		},
+		{
+			note: "single-value partial object with other partial object (implicit 'true' value) rule overlap, unknown keys",
+			modules: modules(
+				`package pkg
+				p[r] := x { r = input.key; x = input.bar }
+				p.q[r] { r = input.key }
+				`),
+			err: "rego_type_error: rule data.pkg.p[r] conflicts with [data.pkg.p.q[r]]",
 		},
 	}
 	for _, tc := range tests {
@@ -3379,6 +3652,50 @@ q = [true | true] { true }
 			exp: MustParseRule(`q = __local0__ { true; __local0__ = [true | true] }`),
 		},
 		{
+			note: "array comprehension value in else head",
+			mod: MustParseModule(`package head
+q { 
+	false 
+} else = [true | true] { 
+	true 
+}
+`),
+			exp: MustParseRule(`q = true { false } else = __local0__ { true; __local0__ = [true | true] }`),
+		},
+		{
+			note: "array comprehension value in head (comprehension-local var)",
+			mod: MustParseModule(`package head
+q = [a | a := true] {
+	false
+} else = [a | a := true] {
+	true
+}
+`),
+			exp: MustParseRule(`q = __local2__ { false; __local2__ = [__local0__ | __local0__ = true] } else = __local3__ { true; __local3__ = [__local1__ | __local1__ = true] }`),
+		},
+		{
+			note: "array comprehension value in function head (comprehension-local var)",
+			mod: MustParseModule(`package head
+f(x) = [a | a := true] {
+	false
+} else = [a | a := true] {
+	true
+}
+`),
+			exp: MustParseRule(`f(__local0__) = __local3__ { false; __local3__ = [__local1__ | __local1__ = true] } else = __local4__ { true; __local4__ = [__local2__ | __local2__ = true] }`),
+		},
+		{
+			note: "array comprehension value in else-func head (reused arg rewrite)",
+			mod: MustParseModule(`package head
+f(x, y) = [x | y] { 
+	false 
+} else = [x | y] {
+	true 
+}
+`),
+			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = [__local0__ | __local1__] } else = __local3__ { true; __local3__ = [__local0__ | __local1__] }`),
+		},
+		{
 			note: "object comprehension value",
 			mod: MustParseModule(`package head
 r = {"true": true | true} { true }
@@ -3386,11 +3703,99 @@ r = {"true": true | true} { true }
 			exp: MustParseRule(`r = __local0__ { true; __local0__ = {"true": true | true} }`),
 		},
 		{
+			note: "object comprehension value in else head",
+			mod: MustParseModule(`package head
+q { 
+	false 
+} else = {"true": true | true} { 
+	true 
+}
+`),
+			exp: MustParseRule(`q = true { false } else = __local0__ { true; __local0__ = {"true": true | true} }`),
+		},
+		{
+			note: "object comprehension value in head (comprehension-local var)",
+			mod: MustParseModule(`package head
+q = {"a": a | a := true} {
+	false
+} else = {"a": a | a := true} {
+	true
+}
+`),
+			exp: MustParseRule(`q = __local2__ { false; __local2__ = {"a": __local0__ | __local0__ = true} } else = __local3__ { true; __local3__ = {"a": __local1__ | __local1__ = true} }`),
+		},
+		{
+			note: "object comprehension value in function head (comprehension-local var)",
+			mod: MustParseModule(`package head
+f(x) = {"a": a | a := true} {
+	false
+} else = {"a": a | a := true} {
+	true
+}
+`),
+			exp: MustParseRule(`f(__local0__) = __local3__ { false; __local3__ = {"a": __local1__ | __local1__ = true} } else = __local4__ { true; __local4__ = {"a": __local2__ | __local2__ = true} }`),
+		},
+		{
+			note: "object comprehension value in else-func head (reused arg rewrite)",
+			mod: MustParseModule(`package head
+f(x, y) = {x: y | true} { 
+	false 
+} else = {x: y | true} {
+	true 
+}
+`),
+			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = {__local0__: __local1__ | true} } else = __local3__ { true; __local3__ = {__local0__: __local1__ | true} }`),
+		},
+		{
 			note: "set comprehension value",
 			mod: MustParseModule(`package head
 s = {true | true} { true }
 `),
 			exp: MustParseRule(`s = __local0__ { true; __local0__ = {true | true} }`),
+		},
+		{
+			note: "set comprehension value in else head",
+			mod: MustParseModule(`package head
+q = {false | false} { 
+	false 
+} else = {true | true} { 
+	true 
+}
+`),
+			exp: MustParseRule(`q = __local0__ { false; __local0__ = {false | false} } else = __local1__ { true; __local1__ = {true | true} }`),
+		},
+		{
+			note: "set comprehension value in head (comprehension-local var)",
+			mod: MustParseModule(`package head
+q = {a | a := true} {
+	false
+} else = {a | a := true} {
+	true
+}
+`),
+			exp: MustParseRule(`q = __local2__ { false; __local2__ = {__local0__ | __local0__ = true} } else = __local3__ { true; __local3__ = {__local1__ | __local1__ = true} }`),
+		},
+		{
+			note: "set comprehension value in function head (comprehension-local var)",
+			mod: MustParseModule(`package head
+f(x) = {a | a := true} {
+	false
+} else = {a | a := true} {
+	true
+}
+`),
+			exp: MustParseRule(`f(__local0__) = __local3__ { false; __local3__ = {__local1__ | __local1__ = true} } else = __local4__ { true; __local4__ = {__local2__ | __local2__ = true} }`),
+		},
+		{
+			note: "set comprehension value in else-func head (reused arg rewrite)",
+			mod: MustParseModule(`package head
+f(x, y) = {x | y} { 
+	false 
+} else = {x | y} {
+	true 
+}
+`),
+			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = {__local0__ | __local1__} } else = __local3__ { true; __local3__ = {__local0__ | __local1__} }`),
 		},
 		{
 			note: "import in else value",
@@ -5064,7 +5469,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5078,7 +5483,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("a.b.c.func(x, y)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5093,12 +5498,12 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y)"), "", 2, 4),
-					Message:  "unused argument x",
+					Message:  "unused argument x. (hint: use _ (wildcard variable) instead)",
 				},
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5113,7 +5518,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5136,7 +5541,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, _)"), "", 2, 4),
-					Message:  "unused argument x",
+					Message:  "unused argument x. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5158,6 +5563,17 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 			expectedErrors: Errors{},
 		},
 		{
+			note: "argvar not used in body but in else-head value comprehension",
+			module: `package test
+			a := {"foo": 1}
+			func(x) {
+				input.test == "foo"
+			} else := { x: v | v := a[x] } {
+				input.test == "bar"
+			}`,
+			expectedErrors: Errors{},
+		},
+		{
 			note: "argvar not used in body and shadowed in head value comprehension",
 			module: `package test
 			a := {"foo": 1}
@@ -5168,7 +5584,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x) := { x: v | x := \"foo\"; v := a[x] }"), "", 3, 4),
-					Message:  "unused argument x",
+					Message:  "unused argument x. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5246,7 +5662,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y, z)"), "", 2, 4),
-					Message:  "unused argument x",
+					Message:  "unused argument x. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5264,7 +5680,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y, z)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5282,7 +5698,19 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y, z)"), "", 2, 4),
-					Message:  "unused argument z",
+					Message:  "unused argument z. (hint: use _ (wildcard variable) instead)",
+				},
+			},
+		},
+		{
+			note: "unused default function argvar",
+			module: `package test
+			default func(x) := 0`,
+			expectedErrors: Errors{
+				&Error{
+					Code:     CompileErr,
+					Location: NewLocation([]byte("func(x) := 0"), "", 2, 12),
+					Message:  "unused argument x. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -5314,7 +5742,7 @@ func TestCompileUnusedAssignedVarsErrorLocations(t *testing.T) {
 				&Error{
 					Code:     CompileErr,
 					Location: NewLocation([]byte("func(x, y)"), "", 2, 4),
-					Message:  "unused argument y",
+					Message:  "unused argument y. (hint: use _ (wildcard variable) instead)",
 				},
 			},
 		},
@@ -7527,6 +7955,11 @@ r2 = 2`,
 r3 = 3`,
 		"hidden": `package system.hidden
 r4 = 4`,
+		"mod4": `package b.c
+r5[x] = 5 { x := "foo" }
+r5.bar = 6 { input.x }
+r5.baz = 7 { input.y }
+`,
 	})
 
 	compileStages(compiler, nil)
@@ -7536,6 +7969,9 @@ r4 = 4`,
 	rule2 := compiler.Modules["mod2"].Rules[1]
 	rule3 := compiler.Modules["mod3"].Rules[0]
 	rule4 := compiler.Modules["hidden"].Rules[0]
+	rule5 := compiler.Modules["mod4"].Rules[0]
+	rule5b := compiler.Modules["mod4"].Rules[1]
+	rule5c := compiler.Modules["mod4"].Rules[2]
 
 	tests := []struct {
 		input         string
@@ -7547,12 +7983,16 @@ r4 = 4`,
 		{input: "data.a.b[x].d", expected: []*Rule{rule1, rule3}},
 		{input: "data.a.b.c", expected: []*Rule{rule1, rule2d, rule2}},
 		{input: "data.a.b.d"},
-		{input: "data", expected: []*Rule{rule1, rule2d, rule2, rule3, rule4}},
-		{input: "data[x]", expected: []*Rule{rule1, rule2d, rule2, rule3, rule4}},
+		{input: "data", expected: []*Rule{rule1, rule2d, rule2, rule3, rule4, rule5, rule5b, rule5c}},
+		{input: "data[x]", expected: []*Rule{rule1, rule2d, rule2, rule3, rule4, rule5, rule5b, rule5c}},
 		{input: "data[data.complex_computation].b[y]", expected: []*Rule{rule1, rule2d, rule2, rule3}},
 		{input: "data[x][y].c.e", expected: []*Rule{rule2d, rule2}},
 		{input: "data[x][y].r3", expected: []*Rule{rule3}},
-		{input: "data[x][y]", expected: []*Rule{rule1, rule2d, rule2, rule3}, excludeHidden: true}, // old behaviour of GetRulesDynamic
+		{input: "data[x][y]", expected: []*Rule{rule1, rule2d, rule2, rule3, rule5, rule5b, rule5c}, excludeHidden: true}, // old behaviour of GetRulesDynamic
+		{input: "data.b.c", expected: []*Rule{rule5, rule5b, rule5c}},
+		{input: "data.b.c.r5", expected: []*Rule{rule5, rule5b, rule5c}},
+		{input: "data.b.c.r5.bar", expected: []*Rule{rule5, rule5b}}, // rule5 might still define a value for the "bar" key
+		{input: "data.b.c.r5.baz", expected: []*Rule{rule5, rule5c}},
 	}
 
 	for _, tc := range tests {

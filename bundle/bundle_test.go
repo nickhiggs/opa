@@ -13,11 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/internal/file/archive"
@@ -83,11 +83,15 @@ func TestManifestEqual(t *testing.T) {
 }
 
 func TestRead(t *testing.T) {
-	testReadBundle(t, "")
+	for _, useMemoryFS := range []bool{false, true} {
+		testReadBundle(t, "", useMemoryFS)
+	}
 }
 
 func TestReadWithBaseDir(t *testing.T) {
-	testReadBundle(t, "/foo/bar")
+	for _, useMemoryFS := range []bool{false, true} {
+		testReadBundle(t, "/foo/bar", useMemoryFS)
+	}
 }
 
 func TestReadWithSizeLimit(t *testing.T) {
@@ -123,7 +127,7 @@ func TestReadBundleInLazyMode(t *testing.T) {
 		{"/a/b/d/data.json", "true"},
 		{"/a/b/y/data.yaml", `foo: 1`},
 		{"/example/example.rego", `package example`},
-		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}}`},
+		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}`},
 		{"/.manifest", `{"revision": "foo", "roots": ["example"]}`}, // data is outside roots but validation skipped in lazy mode
 	}
 
@@ -162,8 +166,11 @@ func TestReadWithBundleEtag(t *testing.T) {
 	}
 }
 
-func testReadBundle(t *testing.T, baseDir string) {
+func testReadBundle(t *testing.T, baseDir string, useMemoryFS bool) {
 	module := `package example`
+	if useMemoryFS && baseDir == "" {
+		baseDir = "."
+	}
 
 	modulePath := "/example/example.rego"
 	if baseDir != "" {
@@ -189,12 +196,23 @@ func testReadBundle(t *testing.T, baseDir string) {
 		{"/example/example.rego", `package example`},
 		{"/policy.wasm", `legacy-wasm-module`},
 		{wasmResolverPath, `wasm-module`},
-		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}}`},
+		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}`},
 		{"/.manifest", fmt.Sprintf(`{"wasm":[{"entrypoint": "authz/allow", "module": "%s"}]}`, fullWasmResolverPath)},
 	}
 
 	buf := archive.MustWriteTarGz(files)
-	loader := NewTarballLoaderWithBaseURL(buf, baseDir)
+	var loader DirectoryLoader
+	if useMemoryFS {
+		fsys := make(fstest.MapFS, 1)
+		fsys["test.tar"] = &fstest.MapFile{Data: buf.Bytes()}
+		fh, err := fsys.Open("test.tar")
+		if err != nil {
+			t.Fatalf("Unexpected error: %s", err)
+		}
+		loader = NewTarballLoaderWithBaseURL(fh, baseDir)
+	} else {
+		loader = NewTarballLoaderWithBaseURL(buf, baseDir)
+	}
 	br := NewCustomReader(loader).WithBaseDir(baseDir)
 
 	bundle, err := br.Read()
@@ -560,6 +578,51 @@ func TestReadWithPatchExtraFiles(t *testing.T) {
 
 }
 
+func TestReadWithPatchPersistProperty(t *testing.T) {
+	cases := []struct {
+		note    string
+		files   [][2]string
+		persist bool
+		err     string
+	}{
+		{
+			note: "persist true property",
+			files: [][2]string{
+				{"/patch.json", `{"data": [{"op": "add", "path": "/a/b/d", "value": "foo"}, {"op": "remove", "path": "a/b/c"}]}`},
+			},
+			persist: true,
+			err:     "'persist' property is true in config. persisting delta bundle to disk is not supported",
+		},
+		{
+			note: "persist false property",
+			files: [][2]string{
+				{"/patch.json", `{"data": [{"op": "add", "path": "/a/b/d", "value": "foo"}, {"op": "remove", "path": "a/b/c"}]}`},
+			},
+			persist: false,
+			err:     "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+			buf := archive.MustWriteTarGz(tc.files)
+			loader := NewTarballLoaderWithBaseURL(buf, "/foo/bar")
+			reader := NewCustomReader(loader).
+				WithBundlePersistence(tc.persist).WithBaseDir("/foo/bar")
+			_, err := reader.Read()
+			if tc.err == "" && err != nil {
+				t.Fatal("Unexpected error occurred:", err)
+			} else if tc.err != "" && err == nil {
+				t.Fatal("Expected error but got success")
+			} else if tc.err != "" && err != nil {
+				if tc.err != err.Error() {
+					t.Fatalf("Expected error to contain %q but got: %v", tc.err, err)
+				}
+			}
+		})
+	}
+}
+
 func TestReadWithSignaturesExtraFiles(t *testing.T) {
 	signedTokenHS256 := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImZvbyJ9.eyJmaWxlcyI6W3sibmFtZSI6Ii5tYW5pZmVzdCIsImhhc2giOiI1MDdhMmMzOGExNDQxZGI1OGQyY2I4Nzk4MmM0MmFhOTFhNDM0MmVmNDIyYTZiNTQyZWRkZWJlZWY2ZjA0MTJmIiwiYWxnb3JpdGhtIjoiU0hBLTI1NiJ9LHsibmFtZSI6ImEvYi9jL2RhdGEuanNvbiIsImhhc2giOiI0MmNmZTY3NjhiNTdiYjVmNzUwM2MxNjVjMjhkZDA3YWM1YjgxMzU1NGViYzg1MGYyY2MzNTg0M2U3MTM3YjFkIiwiYWxnb3JpdGhtIjoiU0hBLTI1NiJ9LHsibmFtZSI6Imh0dHAvcG9saWN5L3BvbGljeS5yZWdvIiwiaGFzaCI6ImE2MTVlZWFlZTIxZGU1MTc5ZGUwODBkZThjMzA1MmM4ZGE5MDExMzg0MDZiYTcxYzM4YzAzMjg0NWY3ZDU0ZjQiLCJhbGdvcml0aG0iOiJTSEEtMjU2In1dLCJpYXQiOjE1OTIyNDgwMjcsImlzcyI6IkpXVFNlcnZpY2UiLCJzY29wZSI6IndyaXRlIn0.Vmm9UDiInUnXXlk-OOjiCy3rR7EVvXS-OFst1rbh3Zo`
 
@@ -602,7 +665,7 @@ func TestVerifyBundleFileHash(t *testing.T) {
 		{"/a/b/y/data.yaml", `foo: 1`},
 		{"/example/example.rego", `package example`},
 		{"/policy.wasm", `modules-compiled-as-wasm-binary`},
-		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}}`},
+		{"/data.json", `{"x": {"y": true}, "a": {"b": {"z": true}}}`},
 	}
 
 	buf := archive.MustWriteTarGz(files)
